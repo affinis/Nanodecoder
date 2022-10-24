@@ -103,11 +103,12 @@ struct Read{
   string barcodeStrand;
   int barcodeMismatch;
   string stat;
+  int polyAT_containing;
   
   void printBarcodeInfo(){
     cout << ID << "\t" << stat << "\t" << OUTER << "\t";
     cout << barcode << "\t" << barcodeStart << "\t" << INNER;
-    cout << "\t" << barcodeStrand << "\t" << barcodeMismatch << endl;
+    cout << "\t" << barcodeStrand << "\t" << barcodeMismatch << "\t" << polyAT_containing << endl;
   }
   
   void genrateKmer(int k){
@@ -253,7 +254,14 @@ public:
       tmpRead.Seq=seq->seq.s;
       tmpRead.Quality=seq->qual.s;
       int barcode_length=barcodes.barcodes[0].length();
-      if(tmpRead.Seq.length()<=barcode_length){
+      int kmer_index_start=-1;
+      int kmer_index_end=-1;
+      int constant_seq_strand;
+      pair<int, int> inner_stat;
+      pair<int, int> outer_stat;
+      string strand_by_polyAT;
+      //if read shorter than barcode, discard
+      if(tmpRead.Seq.length()<=maxDistToEnds){
         tmpRead.INNER=-1;
         tmpRead.OUTER=-1;
         tmpRead.barcode="*";
@@ -264,21 +272,14 @@ public:
         tmpRead.printBarcodeInfo();
         continue;
       }
-      if(tmpRead.Seq.length()<=maxDistToEnds){
-        maxDistToEnds=tmpRead.Seq.length();
-      }
       if(tmpRead.Kmers.size()==0){
         tmpRead.genrateKmer(barcode_length);
       }
-      //      cout << "Read " << i << endl;
-      int kmer_index_start=-1;
-      int kmer_index_end=-1;
-      int constant_seq_strand;
-      pair<int, int> inner_stat;
-      pair<int, int> outer_stat;
-      string strand_by_polyAT;
+
+      //if (find polyA and 5')||(find polyT and 3'), means the barcode should be at left end
       if((checkPolyAT(tmpRead)==0&&tech==5)||(checkPolyAT(tmpRead)==3&&tech==3)){
         constant_seq_strand=0;
+        tmpRead.polyAT_containing=1;
         if(tech==5){
           inner_stat=isConstantSequenceContaining(tmpRead,TENX_TSO,maxDistToEnds,1,0);
           outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,0);
@@ -309,9 +310,11 @@ public:
           kmer_index_start=outer_stat.first;
           kmer_index_end=inner_stat.first;
         }
+      //if (find polyT and 5')||(find polyA and 3'), means the barcode should be at right end
       }else if((checkPolyAT(tmpRead)==3&&tech==5)||(checkPolyAT(tmpRead)==0&&tech==3)){
-        kmer_index_start=tmpRead.Seq.length()-maxDistToEnds;
-        kmer_index_end=tmpRead.Seq.length()-barcode_length;
+        tmpRead.polyAT_containing=1;
+//        kmer_index_start=tmpRead.Seq.length()-maxDistToEnds;
+//        kmer_index_end=tmpRead.Seq.length()-barcode_length;
         constant_seq_strand=3;
         if(tech==5){
           inner_stat=isConstantSequenceContaining(tmpRead,TENX_TSO,maxDistToEnds,1,3);
@@ -344,6 +347,7 @@ public:
           kmer_index_end=outer_stat.second;
         }
       }else{
+        tmpRead.polyAT_containing=0;
         if(tech==5){
           inner_stat=isConstantSequenceContaining(tmpRead,TENX_TSO,maxDistToEnds,1,-1);
           outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,-1);
@@ -499,9 +503,6 @@ public:
           }
         }
       }
-      //      cout << checkPolyAT(Reads[i]) << endl;
-      //      cout << inner_stat.first << " " << inner_stat.second << endl;
-      //      cout << outer_stat.first << " " << outer_stat.second << endl;
       if(kmer_index_start>kmer_index_end){
         tmpRead.barcode="*";
         tmpRead.barcodeStrand="*";
@@ -511,14 +512,26 @@ public:
         tmpRead.printBarcodeInfo();
         continue;
       }
-      //      cout << Reads[i].OUTER << " " << Reads[i].INNER << endl;
       std::vector<string> kmers;
-      //determine kmers by R1 and TSO index
-      if(kmer_index_end+barcode_length-1>tmpRead.Seq.length()){
+      //determine kmers by inner and outer constant seq start index
+      //cout << "determine kmers by inner and outer constant seq start index" << endl;
+      //cout << kmer_index_start << " " << kmer_index_end << " " << barcode_length << " " << tmpRead.Seq.length() << endl;
+      if((kmer_index_end+barcode_length-1>tmpRead.Seq.length())&&(kmer_index_start+barcode_length-1<tmpRead.Seq.length())){
         kmers.insert(kmers.end(),tmpRead.Kmers.begin()+kmer_index_start,tmpRead.Kmers.end());
+      }else if(kmer_index_start+barcode_length-1>tmpRead.Seq.length()){
+        tmpRead.INNER=-1;
+        tmpRead.OUTER=1;
+        tmpRead.barcode="*";
+        tmpRead.barcodeStrand="*";
+        tmpRead.barcodeStart=-1;
+        tmpRead.barcodeMismatch=-1;
+        tmpRead.stat="R1_wrongly_oriented";
+        tmpRead.printBarcodeInfo();
+        continue;
       }else{
         kmers.insert(kmers.end(),tmpRead.Kmers.begin()+kmer_index_start,tmpRead.Kmers.begin()+kmer_index_end);
       }
+      //cout << "ok" << endl;
       //for kmers, try to find exact match in barcode list, else to find ambiguous match
       for(int j=0;j<kmers.size();j++){
         int index=kmer_index_start+j+1;
@@ -614,10 +627,10 @@ public:
                 ambiguous_barcode[kmers[j]]=ambiguous_match;
                 break;
               }
-            }
-          }
-        }
-      }
+            } //for(int m=0;m<candidates.size();m++)
+          }// if(candidates.size()==0) else
+        }//for(int j=0;j<kmers.size();j++)
+      }// if(tmpRead.barcode.length()!=0) else
       //check again if barcodes found, if not, fill the field with '*'.
       if(tmpRead.barcode.length()!=0){
         tmpRead.printBarcodeInfo();
@@ -632,7 +645,7 @@ public:
         tmpRead.printBarcodeInfo();
         continue;
       }
-    }
+    } //while (kseq_read(seq) >= 0)
     kseq_destroy(seq);
     gzclose(outFile);
     gzclose(File);
@@ -939,7 +952,7 @@ public:
       }
 //      cout << Reads[i].OUTER << " " << Reads[i].INNER << endl;
       std::vector<string> kmers;
-      //determine kmers by R1 and TSO index
+      //determine kmers by R1 and ICS index
       if(kmer_index_end+barcode_length-1>Reads[i].Seq.length()){
         kmers.insert(kmers.end(),Reads[i].Kmers.begin()+kmer_index_start,Reads[i].Kmers.end());
       }else{
