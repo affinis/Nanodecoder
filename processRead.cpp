@@ -39,8 +39,8 @@ int main(int argc, char *argv[]){
     case 't':
       tech=atoi(optarg);
       break;
-    }
-  }
+    } // end switch
+  }// end while
   if(K>barcodeRange){
     cout << "Barcode detect range should be larger than k" << endl;
     return 0;
