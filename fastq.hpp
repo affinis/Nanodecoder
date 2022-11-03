@@ -1223,6 +1223,7 @@ public:
         continue;
       }
     } //for(int i=0;i<numReads;i++){
+    gzclose(outFile);
   } //void identifyBarcodes
 }; //class ReadFile
 

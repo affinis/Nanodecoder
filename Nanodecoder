@@ -46,22 +46,22 @@ do
 		exit
 		;;
 	i)
-		fastq_filename=$optarg
+		fastq_filename=$OPTARG
 		;;
 	t)
-		tech=$optarg
+		tech=$OPTARG
 		;;
 	w)
-		barcode_white_list=$optarg
+		barcode_white_list=$OPTARG
 		;;
 	r)
-		reference_for_minimap2=$optarg
+		reference_for_minimap2=$OPTARG
 		;;
 	l)
-		barcode_search_range=$optarg
+		barcode_search_range=$OPTARG
 		;;
 	m)
-		mismatch=$optarg
+		mismatch=$OPTARG
 		;;
 	*)
 		echo "$HELP"
@@ -70,27 +70,29 @@ do
 	esac
 done
 
-#initial processing of reads, filter reads that do not contain R1 and/or TSO
-$nanodecoder -f $fastq_filename -t $tech -b $barcode_white_list -l $barcode_search_range -m $mismatch > read_summary.tsv
+echo "Input fastq: $fastq_filename, tech $tech, barcodeWhiteList $barcode_white_list, range: $barcode_search_range, mismatch $mismatch"
 
-#seqence alignment
+#initial processing of reads, filter reads that do not contain R1 and/or TSO, output: read_summary.tsv, filtered.fastq.gz
+$nanodecoder -f $fastq_filename -t $tech -b $barcode_white_list -r $barcode_search_range -m $mismatch > read_summary.tsv
+
+#seqence alignment, output: aln.sam
 $minimap2 -ax splice -uf -k14 $reference_for_minimap2 filtered.fastq.gz > aln.sam
 
-#filter for chimeric read ids and collect fine mapping results from SAM file
+#filter for chimeric read ids and collect fine mapping results from SAM file, output: chimeric_read_ids.lst, reads_properly_mapped.tsv
 $samprocessor -f aln.sam -m $SC_PATH/IDs2Names.tsv
 
 #collect read and initial barcode flags from 'filtered.fastq.gz' and 'read_summary.tsv'
 zgrep -f chimeric_read_ids.lst -A 3 filtered.fastq.gz | grep -v '^--$' > chimeric_read.fastq
 grep -f chimeric_read_ids.lst -w read_summary.tsv > chimeric_read_init_summary.tsv
 
-#split chimera
+#split chimera, output: chimeric_filtered.fastq.gz, splited_read_summary.tsv
 $chimeraSaver -f chimeric_read.fastq -m chimera_mapping_stat.tsv -s chimeric_read_init_summary.tsv -d $mismatch -l $barcode_search_range -t $tech -b $barcode_white_list > splited_read_summary.tsv
 
 #align splited reads
 $minimap2 -ax splice -uf -k14 $reference_for_minimap2 chimeric_filtered.fastq.gz > splited.aln.sam
 
+#add splited align results to count table, output: apped to chimeric_read_ids.lst, reads_properly_mapped.tsv
+$samprocessor -f splited.aln.sam -m $SC_PATH/IDs2Names.tsv
 
-
-
-
-
+#collect counts
+cat reads_properly_mapped.tsv | tr '_' '\t' | cut -f 2,3 | sort | uniq -c | awk '{print $2"\t"$3"\t"$1}' > counts.tsv

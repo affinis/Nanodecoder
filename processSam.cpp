@@ -114,11 +114,19 @@ int main(int argc, char *argv[]){
     if(isHeader==0){
       continue;
     }else{
+      string ref;
       vector<string> fields=tokenize(status,'\t');
       string read_bc=fields[0];
       int flag=stoi(fields[1]);
-      string ref=id2name[fields[2]];
-      if(read_bc2gene[read_bc].length()==0&&chimera[read_bc].length()==0){
+      if(chimera[read_bc].length()!=0){
+        continue;
+      }
+      if(fields[2]!="*"){
+        ref=id2name[fields[2]];
+      }else{
+        continue;
+      }
+      if(read_bc2gene[read_bc].length()==0){
         read_bc2gene[read_bc]=ref;
       }else{
         if(flag>=2048){
