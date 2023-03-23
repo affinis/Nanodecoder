@@ -1,8 +1,7 @@
 #include <unistd.h>
-#include "fastq.hpp"
+#include "fastq.mod.hpp"
 
 using std::string;
-
 
 int main(int argc, char *argv[]){
   int option;
@@ -16,7 +15,8 @@ int main(int argc, char *argv[]){
   int BarcodeLength=16;
   int barcodeRange=100;
   int tech=5;
-  while((option=getopt(argc,argv,"f:b:m:k:r:l:t:"))!=-1){
+  int threads=4;
+  while((option=getopt(argc,argv,"f:b:m:k:r:l:t:@:"))!=-1){
     switch(option){
     case 'f':
       Readfilename=optarg;
@@ -39,6 +39,9 @@ int main(int argc, char *argv[]){
     case 't':
       tech=atoi(optarg);
       break;
+    case '@':
+      threads=atoi(optarg);
+      break;
     } // end switch
   }// end while
   if(K>barcodeRange){
@@ -52,8 +55,12 @@ int main(int argc, char *argv[]){
   int minSegment=MaxMismatch+1;
   vector<int> SegmentsLengths=getMaxComplexitySegments(BarcodeLength,minSegment);
   cout << "Loading barcodes and building dicts..." << endl;
+//  BarcodeFile* barcodeFile=NULL;
   BarcodeFile barcodeFile(Barcoedefilename,SegmentsLengths,BarcodeLength);
+//  BarcodeFile barcodeFile(Barcoedefilename,SegmentsLengths,BarcodeLength);
   cout << "Dicts done, " << barcodeFile.barcodes.size() << " barcodes loaded." << endl;
-  ReadFile InputFile(Readfilename,barcodeFile,SegmentsLengths,barcodeRange,MaxMismatch,tech);
+//  ReadFile InputFile(Readfilename,barcodeFile,SegmentsLengths,barcodeRange,MaxMismatch,tech);
+//  cout << "Available thread number: "<< std::thread::hardware_concurrency() << endl;
+  ReadFile InputFile(Readfilename,barcodeFile,SegmentsLengths,barcodeRange,MaxMismatch,tech,threads);
   return 0;
 }

@@ -5,6 +5,7 @@
 #include <bits/stdc++.h>
 #include <thread>
 #include <cmath>
+#include <algorithm>
 
 using std::string;
 using std::vector;
@@ -159,9 +160,15 @@ int hamming_distance(string& A, string& B)
 
 
 
-int editDistance(string& seq1, string& seq2){
+int editDistance(string& seq1, string& seq2, int indel_num){
+  
   int n = seq1.length();
   int m = seq2.length();
+  
+  if(indel_num>=n||indel_num>=m){
+    return 0;
+  }
+  vector<int> candidates;
   int dp[n + 1][m + 1];
   for (int i = 0; i <= n; i++)
   {
@@ -179,6 +186,37 @@ int editDistance(string& seq1, string& seq2){
       else{
         dp[i][j] = 1 + min(dp[i][j-1], min(dp[i-1][j], dp[i-1][j-1]));
         }
+      if((i>=n-indel_num&&j==m)||(j>=m-indel_num&&i==n)){
+        candidates.push_back(dp[i][j]);
+      }
+    }
+  }
+  int dist=*std::min_element(candidates.begin(),candidates.end());
+  return dist;
+}
+
+
+int minDistance(string w1, string w2) {
+  int n = w1.size();
+  int m =w2.size();
+  int** dp = new int*[n+1];
+  for(int i =0;i<=n;i++){
+    dp[i] = new int[m+1];
+    for(int j=0;j<=m;j++){
+      dp[i][j]=0;
+      if(i==0)dp[i][j]=j;
+      else if(j==0)dp[i][j] = i;
+    }
+  }
+  w1 = " " + w1;
+  w2 = " " + w2;
+  for(int i =1;i<=n;i++){
+    for(int j = 1;j<=m;j++){
+      if(w1[i] !=w2[j]){
+        dp[i][j] = 1+min({dp[i-1][j],dp[i][j-1],dp[i-1][j-1]});
+      } else {
+        dp[i][j] = dp[i-1][j-1];
+      }
     }
   }
   return dp[n][m];
@@ -210,6 +248,7 @@ void editDistances(int id, string seq1, string seq2, vector<int> results){
   results[id]=dp[n][m];
 }
 
+/*
 vector<int> kmerDistances(string& queryseq, vector<string>& kmers){
   vector<int> distances;
   string revquery=reverse(queryseq);
@@ -226,6 +265,7 @@ vector<int> kmerDistances(string& queryseq, vector<string>& kmers){
   }
   return distances;
 }
+ */
 
 kmerCandidate minKmerDistance(string& queryseq, vector<string>& kmers,
                           bool r=false, bool c=false, bool rc=false){

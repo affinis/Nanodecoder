@@ -41,8 +41,19 @@ int main(int argc, char *argv[]){
   testfile.open(barcodeFileName,fstream::in);
   getline(testfile,firstline,'\n');
   int BarcodeLength=firstline.length();
-  ReadFile chimeraReads(chimeraFastqFilename,chimeraMappingStatFilename,chimeraReadSummaryFilename);
+  ReadFile chimeraReads(chimeraFastqFilename,chimeraReadSummaryFilename,tech);
   vector<int> SegmentsLengths=getMaxComplexitySegments(BarcodeLength,minSegment);
   BarcodeFile barcodeFile(barcodeFileName,SegmentsLengths,BarcodeLength);
-  chimeraReads.identifyBarcodes(barcodeFile,SegmentsLengths,barcoderange,mismatch,tech,"chimeric_filtered.fastq.gz");
+  gzFile outFile=gzopen("chimeric_filtered.fastq.gz", "wb2");
+  gzFile trimmed_outFile=gzopen("trimmed_chimeric_filtered.fastq.gz", "wb2");
+  for(Read read:chimeraReads.Reads){
+    read.identifyBarcodes(barcodeFile,SegmentsLengths,barcoderange,mismatch,tech);
+    read.printBarcodeInfo();
+    if(read.barcode!="*"){
+      read.fq_gz_write(outFile,false);
+      read.fq_gz_write(trimmed_outFile,true);
+    }
+  }
+  gzclose(outFile);
+  gzclose(trimmed_outFile);
 }

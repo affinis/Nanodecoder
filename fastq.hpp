@@ -9,6 +9,9 @@
 #include <zlib.h>
 #include <errno.h>
 #include <unordered_map>
+#include <regex>
+#include <thread>
+#include <omp.h>
 
 #include "kseq.h"
 #include "prosessSeq.hpp"
@@ -18,6 +21,10 @@ using std::ifstream;
 using std::pair;
 using std::to_string;
 using std::fstream;
+using std::regex;
+using std::smatch;
+using std::regex_search;
+using std::thread;
 
 //firstly sample from reads, and find TSO and r1 to determine barcode range
 
@@ -38,6 +45,18 @@ public:
   unordered_map<string, vector<pair<int, int>>> barcode_dict;
   unordered_map<string, string> barcode_ori;
   unordered_map<string, string> barcode_rc;
+  
+  BarcodeFile(){
+    
+  }
+  
+  BarcodeFile(const BarcodeFile& source){
+    barcodes=source.barcodes;
+    barcode_dict=source.barcode_dict;
+    barcode_ori=source.barcode_ori;
+    barcode_rc=source.barcode_rc;
+  }
+  
   BarcodeFile(const char* filename, vector<int> word_sizes, int barcode_length){
     barcodeFile.open(filename);
     while(!barcodeFile.eof()){
@@ -92,10 +111,14 @@ public:
 };
 
 
-struct Read{
+class Read{
+public:
   string ID;
   string Seq;
   string Quality;
+  string UMI="*";
+  string Seq_trimmed;
+  string Quality_trimmed;
   int OUTER;
   int INNER;
   vector<string> Kmers;
@@ -107,21 +130,568 @@ struct Read{
   string stat;
   int polyAT_containing;
   
+  Read(){
+    ID="defalut";
+    Seq="NNNNN";
+    Quality="NNNNN";
+  }
+  
+  Read(const Read* source){
+    ID=source->ID;
+    Seq=source->Seq;
+    Quality=source->Quality;
+  }
+  
   void printBarcodeInfo(){
     cout << ID << "\t" << stat << "\t" << OUTER << "\t";
     cout << barcode << "\t" << barcodeStart << "\t" << INNER;
     cout << "\t" << barcodeStrand << "\t" << barcodeMismatch << "\t" << polyAT_containing << endl;
   }
   
+  void printBarcodeInfo(std::stringstream &stream){
+    stream << ID << "\t" << stat << "\t" << OUTER << "\t";
+    stream << barcode << "\t" << barcodeStart << "\t" << INNER;
+    stream << "\t" << barcodeStrand << "\t" << barcodeMismatch << "\t" << polyAT_containing << endl;
+  }
+  
+  void fq_gz_write(gzFile out_file, bool trim=false) {
+    std::stringstream stream;
+    if(trim){
+      string name=this->ID+"_"+this->barcode+"_"+this->UMI;
+      string seq=this->Seq_trimmed;
+      string qual=this->Quality_trimmed;
+      stream << "@" << name << "\n" << 
+        seq << "\n" << 
+          "+" << "\n" << 
+            qual << "\n";
+    }else{
+      string name=this->ID+"_"+this->barcode;
+      stream << "@" << name << "\n" << 
+      this->Seq << "\n" << 
+        "+" << "\n" << 
+          this->Quality << "\n";
+    }
+    gzputs(out_file, stream.str().c_str());
+  }
+  
+  void fq_gz_write(std::stringstream &stream, bool trim=false) {
+    if(trim){
+      string name=this->ID+"_"+this->barcode+"_"+this->UMI;
+      string seq=this->Seq_trimmed;
+      string qual=this->Quality_trimmed;
+      stream << "@" << name << "\n" << 
+        seq << "\n" << 
+          "+" << "\n" << 
+            qual << "\n";
+    }else{
+      string name=this->ID+"_"+this->barcode;
+      stream << "@" << name << "\n" << 
+        this->Seq << "\n" << 
+          "+" << "\n" << 
+            this->Quality << "\n";
+    }
+  }
+  
+  int checkPolyAT(){
+    string testseq=Seq;
+    int ployA=testseq.find("AAAAAAAAAA");
+    int polyT=testseq.find("TTTTTTTTTT");
+    if(ployA>=0&&polyT<0){
+      return 0;
+    }else if(ployA<0&&polyT>=0){
+      return 3;
+    }else{
+      return -1;
+    }
+  } //
+  
+  pair<int, int> isConstantSequenceContaining(string& constantseq, int testRange, int max_testseq_mismatch, int strand){
+    string testForward;
+    string testseq;
+    string testReverse;
+    string testseq_rc;
+    pair<int, int> res;
+    vector<string> testsegF;
+    vector<string> testsegR;
+    int segments=max_testseq_mismatch+1;
+    int index1=-1;
+    int index2=-1;
+    if(strand==0){
+      testForward=this->Seq.substr(0,testRange);
+      testseq=constantseq;
+      testsegF=getMaxComplexitySegments(testseq,getMaxComplexitySegments(testseq.length(),segments));
+      int i=0;
+      while(i<testsegF.size()&&index1<0&&index2<0){
+        index1=testForward.find(testsegF[i]);
+        i++;
+      } //while
+    }else if(strand==3){
+      testReverse=this->Seq.substr(this->Seq.length()-testRange,testRange);
+      testseq_rc=reverse_complement(constantseq);
+      testsegR=getMaxComplexitySegments(testseq_rc,getMaxComplexitySegments(testseq_rc.length(),segments));
+      int i=0;
+      while(i<testsegR.size()&&index1<0&&index2<0){
+        index2=testReverse.find(testsegR[i])+this->Seq.length()-testRange;
+        i++;
+      } //while
+    }else{
+      testForward=this->Seq.substr(0,testRange);
+      testseq=constantseq;
+      testsegF=getMaxComplexitySegments(testseq,getMaxComplexitySegments(testseq.length(),segments));
+      testReverse=this->Seq.substr(this->Seq.length()-testRange,testRange);
+      testseq_rc=reverse_complement(constantseq);
+      testsegR=getMaxComplexitySegments(testseq_rc,getMaxComplexitySegments(testseq_rc.length(),segments));
+      int j=0;
+      while(j<testsegF.size()&&index1<0){
+        index1=testForward.find(testsegF[j]);
+        j++;
+      } //while
+      int i=0;
+      while(i<testsegR.size()&&index2<0){
+        index2=testReverse.find(testsegR[i]);
+        i++;
+      } //while
+      if(index2>=0){
+        index2=index2+Seq.length()-testRange;
+      }
+    }
+    res.first=index1;
+    res.second=index2;
+    return res;
+  } //isConstantSequenceContaining
+  
   void genrateKmer(int k){
     int kmerSize=k;
-      const int len=Seq.length();
+      const int len=this->Seq.length();
       for(int j=0;j+k<=len;j++){
-        string kmer=Seq.substr(j,k);
+        string kmer=this->Seq.substr(j,k);
         //        cout << kmer << endl;
         Kmers.push_back(kmer);
       }
     }
+  
+  int identifyBarcodes(BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds, int maxMismatch, int tech){
+    int barcode_length=barcodes.barcodes[0].length();
+    int kmer_index_start=-1;
+    int kmer_index_end=-1;
+    int constant_seq_strand;
+    pair<int, int> inner_stat;
+    pair<int, int> outer_stat;
+    string strand_by_polyAT;
+    //if read shorter than barcode, discard
+    if(this->Seq.length()<=maxDistToEnds+50){
+      this->INNER=-1;
+      this->OUTER=-1;
+      this->barcode="*";
+      this->barcodeStrand="*";
+      this->barcodeStart=-1;
+      this->barcodeMismatch=-1;
+      this->stat="Read_too_short";
+//      this->printBarcodeInfo();
+      return 0;
+    }
+    if(this->Kmers.size()==0){
+      this->genrateKmer(barcode_length);
+    }
+    //if (find polyA and 5')||(find polyT and 3'), means the barcode should be at left end
+    if((checkPolyAT()==0&&tech==5)||(checkPolyAT()==3&&tech==3)){
+      constant_seq_strand=0;
+      this->polyAT_containing=1;
+      if(tech==5){
+        inner_stat=isConstantSequenceContaining(TENX_TSO,maxDistToEnds,1,0);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,2,0);
+      }else if(tech==3){
+        inner_stat=isConstantSequenceContaining(POLYT,maxDistToEnds,0,0);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,2,0);
+      }else{
+        cout << "Failed, 5' or 3' not specified or specified a wrong argument";
+      }
+      if(inner_stat.first<0&&outer_stat.first<0){
+        this->INNER=-1;
+        this->OUTER=-1;
+        kmer_index_start=0;
+        kmer_index_end=maxDistToEnds;
+      }else if(inner_stat.first>=0&&outer_stat.first<0){
+        this->INNER=inner_stat.first+1;
+        this->OUTER=-1;
+        kmer_index_start=0;
+        kmer_index_end=inner_stat.first;
+      }else if(inner_stat.first<0&&outer_stat.first>=0){
+        this->INNER=-1;
+        this->OUTER=outer_stat.first+1;
+        kmer_index_start=outer_stat.first;
+        kmer_index_end=maxDistToEnds;
+      }else{
+        this->INNER=inner_stat.first+1;
+        this->OUTER=outer_stat.first+1;
+        kmer_index_start=outer_stat.first;
+        kmer_index_end=inner_stat.first;
+      }
+      //if (find polyT and 5')||(find polyA and 3'), means the barcode should be at right end
+    }else if((checkPolyAT()==3&&tech==5)||(checkPolyAT()==0&&tech==3)){
+      this->polyAT_containing=1;
+      //        kmer_index_start=tmpRead.Seq.length()-maxDistToEnds;
+      //        kmer_index_end=tmpRead.Seq.length()-barcode_length;
+      constant_seq_strand=3;
+      if(tech==5){
+        inner_stat=isConstantSequenceContaining(TENX_TSO,maxDistToEnds,1,3);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,2,3);
+      }else if(tech==3){
+        inner_stat=isConstantSequenceContaining(POLYT,maxDistToEnds,0,3);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,2,3);
+      }else{
+        cout << "Failed, 5' or 3' not specified or specified a wrong argument";
+      }
+      if(inner_stat.second<0&&outer_stat.second<0){
+        this->INNER=-1;
+        this->OUTER=-1;
+        kmer_index_start=this->Seq.length()-maxDistToEnds;
+        kmer_index_end=this->Seq.length()-barcode_length;
+      }else if(inner_stat.second>=0&&outer_stat.second<0){
+        this->INNER=inner_stat.second+1;
+        this->OUTER=-1;
+        kmer_index_start=inner_stat.second;
+        kmer_index_end=this->Seq.length()-barcode_length;
+      }else if(inner_stat.second<0&&outer_stat.second>=0){
+        this->INNER=-1;
+        this->OUTER=outer_stat.second+1;
+        kmer_index_start=this->Seq.length()-maxDistToEnds;
+        kmer_index_end=outer_stat.second;
+      }else{
+        this->INNER=inner_stat.second+1;
+        this->OUTER=outer_stat.second+1;
+        kmer_index_start=inner_stat.second;
+        kmer_index_end=outer_stat.second;
+      }
+    }else{
+      this->polyAT_containing=0;
+      if(tech==5){
+        inner_stat=isConstantSequenceContaining(TENX_TSO,maxDistToEnds,1,-1);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,2,-1);
+      }else if(tech==3){
+        inner_stat=isConstantSequenceContaining(POLYT,maxDistToEnds,0,-1);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,2,-1);
+      }else{
+        cout << "Failed, 5' or 3' not specified or specified a wrong argument";
+      }
+      if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second<0){
+        this->INNER=-1;
+        this->OUTER=-1;
+        this->barcode="*";
+        this->barcodeStrand="*";
+        this->barcodeStart=-1;
+        this->barcodeMismatch=-1;
+        this->stat="ICS_R1_missing";
+//        this->printBarcodeInfo();
+        return 0;
+      }else if(inner_stat.first<0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second<0){
+        this->INNER=-1;
+        this->OUTER=outer_stat.first+1;
+        kmer_index_start=outer_stat.first;
+        kmer_index_end=maxDistToEnds;
+        constant_seq_strand=0;
+      }else if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second>=0){
+        this->INNER=-1;
+        this->OUTER=outer_stat.second+1;
+        kmer_index_start=this->Seq.length()-maxDistToEnds;
+        kmer_index_end=outer_stat.second;
+        constant_seq_strand=3;
+      }else if(inner_stat.first<0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second>=0){
+        this->INNER=-1;
+        this->OUTER=-2;
+        this->barcode="*";
+        this->barcodeStrand="*";
+        this->barcodeStart=-1;
+        this->barcodeMismatch=-1;
+        this->stat="ICS_missing_R1_both_ends";
+//        this->printBarcodeInfo();
+        return 0;
+      }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second<0){
+        this->INNER=inner_stat.first+1;
+        this->OUTER=-1;
+        kmer_index_start=0;
+        kmer_index_end=inner_stat.first;
+        constant_seq_strand=0;
+      }else if(inner_stat.first>=0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second<0){
+        this->INNER=inner_stat.first+1;
+        this->OUTER=outer_stat.first+1;
+        kmer_index_start=outer_stat.first;
+        kmer_index_end=inner_stat.first;
+        constant_seq_strand=0;
+      }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second>=0){
+        this->INNER=inner_stat.first+1;
+        this->OUTER=outer_stat.second+1;
+        this->barcode="*";
+        this->barcodeStrand="*";
+        this->barcodeStart=-1;
+        this->barcodeMismatch=-1;
+        this->stat="ICS_R1_different_end";
+//        this->printBarcodeInfo();
+        return 0;
+      }else if(inner_stat.first>=0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second>=0){
+        this->INNER=inner_stat.first+1;
+        this->OUTER=outer_stat.first+1;
+        kmer_index_start=outer_stat.first;
+        kmer_index_end=inner_stat.first;
+        constant_seq_strand=0;
+      }else if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second<0){
+        this->INNER=inner_stat.second+1;
+        this->OUTER=-1;
+        kmer_index_start=inner_stat.second;
+        kmer_index_end=this->Seq.length()-barcode_length;
+        constant_seq_strand=3;
+      }else if(inner_stat.first<0&&outer_stat.first>=0&&inner_stat.second>=0&&outer_stat.second<0){
+        this->INNER=inner_stat.second+1;
+        this->OUTER=outer_stat.first+1;
+        this->barcode="*";
+        this->barcodeStrand="*";
+        this->barcodeStart=-1;
+        this->barcodeMismatch=-1;
+        this->stat="ICS_R1_different_end";
+//        this->printBarcodeInfo();
+        return 0;
+      }else if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second>=0){
+        this->INNER=inner_stat.second+1;
+        this->OUTER=outer_stat.second+1;
+        kmer_index_start=inner_stat.second;
+        kmer_index_end=outer_stat.second;
+        constant_seq_strand=3;
+      }else if(inner_stat.first<0&&outer_stat.first>=0&&inner_stat.second>=0&&outer_stat.second>=0){
+        this->INNER=inner_stat.second+1;
+        this->OUTER=outer_stat.second+1;
+        kmer_index_start=inner_stat.second;
+        kmer_index_end=outer_stat.second;
+        constant_seq_strand=3;
+      }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second<0){
+        this->INNER=-2;
+        this->OUTER=-1;
+        this->barcode="*";
+        this->barcodeStrand="*";
+        this->barcodeStart=-1;
+        this->barcodeMismatch=-1;
+        this->stat="ICS_both_ends_R1_missing";
+//        this->printBarcodeInfo();
+        return 0;
+      }else if(inner_stat.first>=0&&outer_stat.first>=0&&inner_stat.second>=0&&outer_stat.second<0){
+        this->INNER=inner_stat.first+1;
+        this->OUTER=outer_stat.first+1;
+        kmer_index_start=outer_stat.first;
+        kmer_index_end=inner_stat.first;
+        constant_seq_strand=0;
+      }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second>=0){
+        this->INNER=inner_stat.second+1;
+        this->OUTER=outer_stat.second+1;
+        kmer_index_start=inner_stat.second;
+        kmer_index_end=outer_stat.second;
+        constant_seq_strand=3;
+      }else{
+        if(inner_stat.first>outer_stat.first&&inner_stat.second<outer_stat.second){
+          this->INNER=-2;
+          this->OUTER=-2;
+          this->barcode="*";
+          this->barcodeStrand="*";
+          this->barcodeStart=-1;
+          this->barcodeMismatch=-1;
+          this->stat="ICS_R1_both_ends";
+//          this->printBarcodeInfo();
+          return 0;
+        }else if(inner_stat.first<outer_stat.first&&inner_stat.second<outer_stat.second){
+          this->INNER=inner_stat.second+1;
+          this->OUTER=outer_stat.second+1;
+          kmer_index_start=inner_stat.second;
+          kmer_index_end=outer_stat.second;
+          constant_seq_strand=3;
+        }else if(inner_stat.first>outer_stat.first&&inner_stat.second>outer_stat.second){
+          this->INNER=inner_stat.first+1;
+          this->OUTER=outer_stat.first+1;
+          kmer_index_start=outer_stat.first;
+          kmer_index_end=inner_stat.first;
+          constant_seq_strand=0;
+        }else{
+          this->INNER=-1;
+          this->OUTER=-1;
+          this->barcode="*";
+          this->barcodeStrand="*";
+          this->barcodeStart=-1;
+          this->barcodeMismatch=-1;
+          this->stat="ICS_R1_wrongly_oriented";
+//          this->printBarcodeInfo();
+          return 0;
+        }
+      }
+    }
+    if(kmer_index_start>kmer_index_end){
+      this->barcode="*";
+      this->barcodeStrand="*";
+      this->barcodeStart=-1;
+      this->barcodeMismatch=-1;
+      this->stat="ICS_R1_wrongly_oriented";
+//      this->printBarcodeInfo();
+      return 0;
+    }
+    std::vector<string> kmers;
+    //determine kmers by inner and outer constant seq start index
+    //cout << "determine kmers by inner and outer constant seq start index" << endl;
+    //cout << kmer_index_start << " " << kmer_index_end << " " << barcode_length << " " << tmpRead.Seq.length() << endl;
+    if((kmer_index_end+barcode_length-1>this->Seq.length())&&(kmer_index_start+barcode_length-1<this->Seq.length())){
+      kmers.insert(kmers.end(),this->Kmers.begin()+kmer_index_start,this->Kmers.end());
+    }else if(kmer_index_start+barcode_length-1>this->Seq.length()){
+      this->INNER=-1;
+      this->OUTER=1;
+      this->barcode="*";
+      this->barcodeStrand="*";
+      this->barcodeStart=-1;
+      this->barcodeMismatch=-1;
+      this->stat="R1_wrongly_oriented";
+//      this->printBarcodeInfo();
+      return 0;
+    }else{
+      kmers.insert(kmers.end(),this->Kmers.begin()+kmer_index_start,this->Kmers.begin()+kmer_index_end);
+    }
+    //cout << "ok" << endl;
+    //for kmers, try to find exact match in barcode list, else to find ambiguous match
+    for(int j=0;j<kmers.size();j++){
+      int index=kmer_index_start+j+1;
+      /*
+       if(j<=kmers.size()/2){
+       index=j+1;
+       }else{
+       index=Reads[i].Seq.length()-maxDistToEnds+j-(kmers.size()/2)+1;
+       }
+       */
+      if(barcodes.barcode_ori[kmers[j]].length()!=0&&constant_seq_strand==0){
+        this->barcode=kmers[j];
+        this->barcodeStrand="original";
+        this->barcodeStart=index;
+        this->barcodeMismatch=0;
+        this->stat="fine";
+        break;
+      }else if(barcodes.barcode_rc[kmers[j]].length()!=0&&constant_seq_strand==3){
+        this->barcode=barcodes.barcode_rc[kmers[j]];
+        this->barcodeStrand="reverse_complement";
+        this->barcodeStart=index;
+        this->barcodeMismatch=0;
+        this->stat="fine";
+        break;
+      }
+    } //for(int j=0;j<kmers.size();j++)
+    //if exact match found, stop function.
+    if(this->barcode.length()!=0){
+//      cout << "exact hits found" << endl;
+//      this->printBarcodeInfo();
+//      fq_gz_write(outFile);
+//      substring to generate a seq downstream barcode for 10nt as UMI, 
+//      and modify reverse_com seq to original one, cut off adapter to UMI
+      this->guessUMI(tech);
+      return 0;
+      //start to find ambiguous match
+    }else{
+      //cout << "start to find ambiguous hits.." << endl;
+      for(int j=0;j<kmers.size();j++){
+        int index=kmer_index_start+j+1;
+        vector<pair<int, int>> candidates;
+        vector<string> kmer_segment=getMaxComplexitySegments(kmers[j],segments);
+        for(int n=0;n<kmer_segment.size();n++){
+          string query=kmer_segment[n]+to_string(n)+to_string(constant_seq_strand);
+          candidates.insert(candidates.end(),barcodes.barcode_dict[query].begin(),barcodes.barcode_dict[query].end());
+        }
+        if(candidates.size()==0){
+          continue;
+        }else{
+          for(int m=0;m<candidates.size();m++){
+            int barcode_dict_index=candidates[m].first-1;
+            string candidate_ori=barcodes.barcodes[barcode_dict_index];
+            string candidate=barcodes.barcodes[barcode_dict_index];
+            int strand=candidates[m].second;
+            if(strand==1){
+              candidate=reverse(candidate);
+            }else if(strand==2){
+              candidate=complement(candidate);
+            }else if(strand==3){
+              candidate=reverse_complement(candidate);
+            }else{
+              if(strand!=0){
+                cout << "Unsupported strand coding, Read: " << this->ID << ", kmer: " << kmers[j] << endl;
+              }
+            }
+            int mismatch=editDistance(candidate,kmers[j],maxMismatch);
+            //take care here!!!! once kmer meets the threshould, it will be considered to be the barcode, 
+            //even there may be better ones after it.
+            if(mismatch>maxMismatch){
+              continue;
+            }else{
+              this->barcode=candidate_ori;
+              this->barcodeStrand=num_to_strand[strand];
+              this->barcodeStart=index;
+              this->barcodeMismatch=mismatch;
+              this->stat="fine";
+              break;
+            }
+          } //for(int m=0;m<candidates.size();m++)
+        }// if(candidates.size()==0) else
+      }//for(int j=0;j<kmers.size();j++)
+    }// if(tmpRead.barcode.length()!=0) else
+    //check again if barcodes found, if not, fill the field with '*'.
+    if(this->barcode.length()!=0){
+//      this->printBarcodeInfo();
+//      fq_gz_write(outFile);
+//      return 0;
+    //substring to generate a seq downstream barcode for 10nt as UMI, 
+    //and modify reverse_com seq to original one, cut off adapter to UMI
+        this->guessUMI(tech);
+    }else{
+      this->barcode="*";
+      this->barcodeStrand="*";
+      this->barcodeStart=-1;
+      this->barcodeMismatch=-1;
+      this->stat="barcode_missing";
+//      this->printBarcodeInfo();
+      return 0;
+    }
+  } //identifyBarcodes
+
+private:
+  void guessUMI(int tech){
+    if(tech==3){
+      if(this->barcode.find("*")!=0){
+        if(this->barcodeStrand.find("original")==0){
+          int UMI_start=this->barcodeStart+16-1;
+          int UMI_end=UMI_start+10-1;
+          this->UMI=this->Seq.substr(UMI_start,10);
+          this->Seq_trimmed=reverse_complement(this->Seq.substr(UMI_end+1));
+          this->Quality_trimmed=reverse(this->Quality.substr(UMI_end+1));
+        }else{
+          int UMI_start=this->barcodeStart-10-1;
+          int UMI_end=UMI_start+10-1;
+          this->UMI=reverse_complement(this->Seq.substr(UMI_start,10));
+          this->Seq_trimmed=this->Seq.substr(0,UMI_start);
+          this->Quality_trimmed=this->Quality.substr(0,UMI_start);
+        }
+      }else{
+        return;
+      }
+    }else if(tech==5){
+      if(this->barcode.find("*")!=0){
+        if(this->barcodeStrand.find("original")==0){
+          int UMI_start=this->barcodeStart+16-1;
+          int UMI_end=UMI_start+10-1;
+          this->UMI=this->Seq.substr(UMI_start,10);
+          this->Seq_trimmed=this->Seq.substr(UMI_end+1);
+          this->Quality_trimmed=this->Quality.substr(UMI_end+1);
+        }else{
+          int UMI_start=this->barcodeStart-10-1;
+          int UMI_end=UMI_start+10-1;
+          this->UMI=reverse_complement(this->Seq.substr(UMI_start,10));
+          this->Seq_trimmed=reverse_complement(this->Seq.substr(0,UMI_start));
+          this->Quality_trimmed=reverse(this->Quality.substr(0,UMI_start));
+        }
+      }else{
+        return;
+      }
+    }else{
+      return;
+    }
+  } //guessUMI
 };
 
 struct AmbiguousBarcode{
@@ -141,8 +711,6 @@ vector<string> tokenize(string const &str, const char delim){
   }
   return splits;
 }
-
-
 
 class ReadFile{
 private:
@@ -242,7 +810,240 @@ public:
     gzclose(File);
   };
   
-  //constructor aiming at processing chimera reads
+  //constructor removing chimera by identifying multiple polyT/A
+  ReadFile(const char* filename, const char* read_summary_filename, int tech){
+    fstream mapping_stat;
+    fstream read_summary;
+    fstream read_split_report;
+    gzFile RawReadFile=gzopen("chimeric_raw_split_fastq.gz", "wb2");
+    ReadCount=0;
+    unordered_map<string,pair<int, string>> read2barcodeStar_strand;
+    cout << "loading chimera read summary..." << endl;
+    read_summary.open(read_summary_filename,fstream::in);
+    //    int line_counter=0;
+    while(!read_summary.eof()){
+      string record;
+      vector<string> fields;
+      string read_id;
+      pair<int, string> barcodeStar_strand;
+      getline(read_summary,record,'\n');
+      //      cout << line << endl;
+      //      line_counter++;
+      //      if(line_counter%100000==0){
+      //        cout << "processed " << line_counter << " line" << endl;
+      //      }
+      if(record==""){
+        continue;
+      }
+      fields=tokenize(record,'\t');
+      read_id=fields[0];
+      barcodeStar_strand.first=stoi(fields[4]);
+      barcodeStar_strand.second=fields[6];
+      read2barcodeStar_strand[read_id]=barcodeStar_strand;
+    }
+    read_summary.close();
+    cout << "start read processing" << endl;
+    read_split_report.open("read_split_report.tsv",fstream::in|fstream::out|fstream::app);
+    File=gzopen(filename, "r");
+    seq = kseq_init(File);
+    while (kseq_read(seq) >= 0){
+      ReadCount++;
+      Read tmpRead;
+      int split_position;
+      int read_length;
+      tmpRead.ID=seq->name.s;
+      tmpRead.ID=tokenize(tmpRead.ID,'_')[0];
+      tmpRead.Seq=seq->seq.s;
+      tmpRead.Quality=seq->qual.s;
+      tmpRead.barcodeStrand=read2barcodeStar_strand[tmpRead.ID].second;
+      tmpRead.barcodeStart=read2barcodeStar_strand[tmpRead.ID].first;
+      read_length=tmpRead.Seq.length();
+      if(read_length<=200){
+        read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "read_too_short" << endl;
+        fq_gz_write(RawReadFile,tmpRead);
+        continue;
+      }
+      if(tmpRead.barcodeStrand=="original"){
+          Read splitRead1;
+          Read splitRead2;
+          int first_read_length;
+          if(tech==5){
+            vector<string> polyAs;
+            regex regexp("A{10,10}[^A]");
+            smatch polyAs_match;
+            string testseq=tmpRead.Seq;
+            while(regex_search(testseq, polyAs_match, regexp)){
+              //              cout << polyTs[0] << endl;
+              polyAs.push_back(polyAs_match[0]);
+              testseq=polyAs_match.suffix().str();
+            }
+            if(polyAs.empty()){
+              read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
+              fq_gz_write(RawReadFile,tmpRead);
+              continue;
+            }else{
+              int polyAIndex;
+              polyAIndex=tmpRead.Seq.find(polyAs[0]);
+//              cout << polyAs[0] << endl;
+//              cout << polyAIndex << endl;
+              if(polyAIndex+10>read_length-200){
+                read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
+                fq_gz_write(RawReadFile,tmpRead);
+                continue;
+              }else{
+                first_read_length=polyAIndex+10;
+              }
+            }//if(polyAs.empty())
+          }else if(tech==3){
+            vector<string> polyTs;
+            regex regexp("[^T]T{10,10}");
+            smatch polyTs_match;
+            string testseq=tmpRead.Seq;
+            while(regex_search(testseq, polyTs_match, regexp)){
+              //              cout << polyTs[0] << endl;
+              polyTs.push_back(polyTs_match[0]);
+              testseq=polyTs_match.suffix().str();
+            }
+            if(polyTs.empty()){
+              read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
+              fq_gz_write(RawReadFile,tmpRead);
+              continue;
+            }else if(polyTs.size()==1){
+              int polyTIndex;
+              polyTIndex=tmpRead.Seq.find(polyTs[0]);
+              if(polyTIndex+1<=70){
+                read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
+                fq_gz_write(RawReadFile,tmpRead);
+                continue;
+              }else{
+                first_read_length=polyTIndex+1-70;
+              }
+            }else{
+              int polyTIndex;
+              if(polyTs[0]==polyTs[1]){
+                polyTIndex=tmpRead.Seq.find(polyTs[0],tmpRead.Seq.find(polyTs[0])+1);
+              }else{
+                polyTIndex=tmpRead.Seq.find(polyTs[1]);
+              }
+              first_read_length=polyTIndex+1-70;
+            }
+          }else{
+            cout << "Invalid tech while splitting reads" << endl;
+            exit(0);
+          }
+          splitRead1.ID=tmpRead.ID + "-1";
+          splitRead1.Seq=tmpRead.Seq.substr(0,first_read_length);
+          splitRead1.Quality=tmpRead.Quality.substr(0,first_read_length);
+          splitRead2.ID=tmpRead.ID + "-2";
+          splitRead2.Seq=tmpRead.Seq.substr(first_read_length,read_length-first_read_length);
+          splitRead2.Quality=tmpRead.Quality.substr(first_read_length,read_length-first_read_length);
+          read_split_report << tmpRead.ID << "\t" << splitRead1.ID+",-2" << "\t" << tmpRead.barcodeStart << "\t" << first_read_length << "\t" << "splited" << endl;
+          fq_gz_write(RawReadFile,splitRead1);
+          fq_gz_write(RawReadFile,splitRead2);
+          Reads.push_back(splitRead1);
+          Reads.push_back(splitRead2);
+      }else{
+        //reverse complement read
+          Read splitRead1;
+          Read splitRead2;
+          int first_read_length;
+          if(tech==5){
+            vector<string> polyTs;
+            regex regexp("[^T]T{10,10}");
+            smatch polyTs_match;
+            string testseq=tmpRead.Seq;
+            while(regex_search(testseq, polyTs_match, regexp)){
+//              cout << polyTs[0] << endl;
+              polyTs.push_back(polyTs_match[0]);
+              testseq=polyTs_match.suffix().str();
+            }
+            if(polyTs.empty()){
+//              cout << "no polyT found" << endl;
+              read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
+              fq_gz_write(RawReadFile,tmpRead);
+              continue;
+            }else{
+              int polyTIndex;
+              int sameTail=0;
+              for(int i=0;i<polyTs.size()-1;i++){
+                if(polyTs[i]==polyTs[polyTs.size()-1]){
+                  sameTail++;
+                }
+              }
+//              cout << sameTail << endl;
+              if(sameTail==0){
+//                cout << "unique tail" << endl;
+                polyTIndex=tmpRead.Seq.find(polyTs[polyTs.size()-1]);
+              }else{
+ //               cout << "iterating tails" << endl;
+                polyTIndex=-1;
+                for(int j=0;j<=sameTail;j++){
+                  polyTIndex=tmpRead.Seq.find(polyTs[polyTs.size()-1],polyTIndex+1);
+                }
+              }
+              if(polyTIndex+1<200){
+//                cout << "polyT too close to left end" << endl;
+                read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
+                fq_gz_write(RawReadFile,tmpRead);
+                continue;
+              }else{
+                first_read_length=read_length-(polyTIndex+1);
+              }
+            }
+          }else if(tech==3){
+            vector<string> polyAs;
+            regex regexp("A{10,10}[^A]");
+            smatch polyAs_match;
+            string testseq=tmpRead.Seq;
+            while(regex_search(testseq, polyAs_match, regexp)){
+              //              cout << polyTs[0] << endl;
+              polyAs.push_back(polyAs_match[0]);
+              testseq=polyAs_match.suffix().str();
+            }
+            if(polyAs.empty()){
+              read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
+              fq_gz_write(RawReadFile,tmpRead);
+              continue;
+            }else if(polyAs.size()==1){
+              int polyAIndex;
+              polyAIndex=tmpRead.Seq.find(polyAs[0]);
+              if(polyAIndex+10>read_length-70){
+                read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
+                fq_gz_write(RawReadFile,tmpRead);
+                continue;
+              }else{
+                first_read_length=read_length-(polyAIndex+10+70);
+              }
+            }else{
+              int polyAIndex;
+              polyAIndex=tmpRead.Seq.find(polyAs[polyAs.size()-2]);
+              first_read_length=read_length-(polyAIndex+10+70);
+            }
+          }else{
+            cout << "Invalid tech while splitting reads" << endl;
+            exit(0);
+          }
+          splitRead1.ID=tmpRead.ID+"-1";
+          splitRead1.Seq=tmpRead.Seq.substr(read_length-first_read_length,first_read_length);
+          splitRead1.Quality=tmpRead.Quality.substr(read_length-first_read_length,first_read_length);
+          splitRead2.ID=tmpRead.ID+"-2";
+          splitRead2.Seq=tmpRead.Seq.substr(0,read_length-first_read_length);
+          splitRead2.Quality=tmpRead.Quality.substr(0,read_length-first_read_length);
+          read_split_report << tmpRead.ID << "\t" << splitRead1.ID+",-2" << "\t" << tmpRead.barcodeStart << "\t" << read_length-first_read_length << "\t" << "splited" << endl;
+          fq_gz_write(RawReadFile,splitRead1);
+          fq_gz_write(RawReadFile,splitRead2);
+          Reads.push_back(splitRead1);
+          Reads.push_back(splitRead2);
+        }
+    }
+    kseq_destroy(seq);
+    gzclose(File);
+    gzclose(RawReadFile);
+    read_split_report.close();
+  };
+  
+  
+  //constructor aiming at processing chimera reads with mapping stat
   ReadFile(const char* filename, const char* mapping_stat_filename, const char* read_summary_filename){
     fstream mapping_stat;
     fstream read_summary;
@@ -288,7 +1089,7 @@ public:
     mapping_stat.close();
     cout << "loading chimera read summary..." << endl;
     read_summary.open(read_summary_filename,fstream::in);
-    int line_counter=0;
+//    int line_counter=0;
     while(!read_summary.eof()){
       string record;
       vector<string> fields;
@@ -296,10 +1097,10 @@ public:
       pair<int, string> barcodeStar_strand;
       getline(read_summary,record,'\n');
 //      cout << line << endl;
-      line_counter++;
-      if(line_counter%100000==0){
+//      line_counter++;
+//      if(line_counter%100000==0){
 //        cout << "processed " << line_counter << " line" << endl;
-      }
+//      }
       if(record==""){
         continue;
       }
@@ -319,16 +1120,19 @@ public:
       Read tmpRead;
       int mapping_start;
       int split_position;
+      int read_length;
       tmpRead.ID=seq->name.s;
       tmpRead.ID=tokenize(tmpRead.ID,'_')[0];
       tmpRead.Seq=seq->seq.s;
       tmpRead.Quality=seq->qual.s;
       tmpRead.barcodeStrand=read2barcodeStar_strand[tmpRead.ID].second;
       tmpRead.barcodeStart=read2barcodeStar_strand[tmpRead.ID].first;
+      read_length=tmpRead.Seq.length();
       if(tmpRead.barcodeStrand=="original"){
         mapping_start=min(read2clippos[tmpRead.ID][0],read2clippos[tmpRead.ID][2]);
-        if(mapping_start-tmpRead.barcodeStart>=100){
+        if(mapping_start-tmpRead.barcodeStart>=200){
           read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << mapping_start << "\t" << -1 << "\t" << "complex_fusion" << endl;
+          continue;
         }else{
           Read splitRead1;
           Read splitRead2;
@@ -351,8 +1155,9 @@ public:
         }
       }else{
         mapping_start=tmpRead.Seq.length()-min(read2clippos[tmpRead.ID][1],read2clippos[tmpRead.ID][3])-1;
-        if(tmpRead.barcodeStart-mapping_start>84){
+        if(tmpRead.barcodeStart-mapping_start>=200){
           read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << mapping_start << "\t" << -1 << "\t" << "complex_fusion" << endl;
+          continue;
         }else{
           Read splitRead1;
           Read splitRead2;
@@ -379,7 +1184,8 @@ public:
     gzclose(File);
     read_split_report.close();
   };
-  
+ 
+  //function used in ReadFile(const char* filename, const char* read_summary_filename, int tech)
   void fq_gz_write(gzFile out_file, Read& read) {
     std::stringstream stream;
     string name=read.ID+"_"+read.barcode;
@@ -389,420 +1195,118 @@ public:
       read.Quality << "\n";
     gzputs(out_file, stream.str().c_str());
   }
+
   
   //active constructor
   //constructor generate output while reading reads
-  ReadFile(const char* filename, BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds, int maxMismatch, int tech){
+  ReadFile(const char* filename, BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds, int maxMismatch, int tech, int threadnum){
+    string output_filename="filtered.fastq.gz";
+    string trimmed_output_filename="trimmed_filtered.fastq.gz";
+    gzFile outFile=gzopen(output_filename.c_str(), "wb2");
+    gzFile trimmed_outFile=gzopen(trimmed_output_filename.c_str(), "wb2");
+    ReadCount=0;
+    vector<Read> Reads;
+    vector<vector<Read>> Readmatrix;
+    std::stringstream streamFQ;
+    std::stringstream streamFQ_trim;
+    std::stringstream streambarcodeinfo;
+    int barcode_length=barcodes.barcodes[0].length();
+    File=gzopen(filename, "r");
+    seq=kseq_init(File);
+    int threadcount=0;
+    while(true){
+      if(kseq_read(seq)>=0){
+        Read tmpRead;
+        tmpRead.ID=seq->name.s;
+        tmpRead.Seq=seq->seq.s;
+        tmpRead.Quality=seq->qual.s;
+        Reads.push_back(tmpRead);
+        if(Reads.size()==10000){
+          Readmatrix.push_back(Reads);
+          threadcount++;
+//          cout << "thread count: " << threadcount << endl;
+          Reads.clear();
+          if(Readmatrix.size()==threadnum){
+//            cout << "excuting in if(threadcount==threadnum)" << endl;
+            #pragma omp parallel for
+            for(int i=0;i<Readmatrix.size();++i){
+//              cout << "thread: " << i << endl;
+              BarcodeFile threadbarcode=barcodes;
+              vector<int> threadsegments=segments;
+              int threadmaxDistToEnds=maxDistToEnds;
+              int threadmaxMismatch=maxMismatch;
+              int threadtech=tech;
+              identifyBarcodesinBlock(Readmatrix[i],threadbarcode,threadsegments,threadmaxDistToEnds,threadmaxMismatch,threadtech);
+            } //for(int i=0;i<threadnum;++i)
+            
+            writeReadData(Readmatrix,streambarcodeinfo,streamFQ,streamFQ_trim);
+            threadcount=0;
+            Readmatrix.clear();
+            cout << streambarcodeinfo.str().c_str() << endl;
+            gzputs(outFile,streamFQ.str().c_str());
+            gzputs(trimmed_outFile,streamFQ_trim.str().c_str());
+            streambarcodeinfo.str("");
+            streamFQ.str("");
+            streamFQ_trim.str("");
+          }
+        }else{
+          continue;
+        } //if(Reads.size()==10000)
+      }else{
+        Readmatrix.push_back(Reads);
+        threadcount++;
+        Reads.clear();
+//        cout << "excuting in if(threadcount==threadnum)else" << endl;
+        #pragma omp parallel for
+        for(int i=0;i<Readmatrix.size();++i){
+          BarcodeFile threadbarcode=barcodes;
+          vector<int> threadsegments=segments;
+          int threadmaxDistToEnds=maxDistToEnds;
+          int threadmaxMismatch=maxMismatch;
+          int threadtech=tech;
+          identifyBarcodesinBlock(Readmatrix[i],threadbarcode,threadsegments,threadmaxDistToEnds,threadmaxMismatch,threadtech);
+        } //for(int i=0;i<Readmatrix.size();++i)
+
+        writeReadData(Readmatrix,streambarcodeinfo,streamFQ,streamFQ_trim);
+        threadcount=0;
+        Readmatrix.clear();
+        cout << streambarcodeinfo.str().c_str() << endl;
+        gzputs(outFile,streamFQ.str().c_str());
+        gzputs(trimmed_outFile,streamFQ_trim.str().c_str());
+        streambarcodeinfo.str("");
+        streamFQ.str("");
+        streamFQ_trim.str("");
+        break;
+      } //if(kseq_read(seq)>=0)else{}
+    } //while(true)
+  };
+
+/*  
+  //active constructor for multithreads
+  //constructor generate output while reading reads
+  ReadFile(const char* filename, BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds, int maxMismatch, int tech, int threads){
     ReadCount=0;
     string output_filename="filtered.fastq.gz";
     gzFile outFile=gzopen(output_filename.c_str(), "wb2");
     int barcode_length=barcodes.barcodes[0].length();
     File=gzopen(filename, "r");
-    seq = kseq_init(File);
+    seq=kseq_init(File);
     while (kseq_read(seq) >= 0){
       ReadCount++;
-      Read tmpRead;
-      tmpRead.ID=seq->name.s;
-      tmpRead.Seq=seq->seq.s;
-      tmpRead.Quality=seq->qual.s;
-      int barcode_length=barcodes.barcodes[0].length();
-      int kmer_index_start=-1;
-      int kmer_index_end=-1;
-      int constant_seq_strand;
-      pair<int, int> inner_stat;
-      pair<int, int> outer_stat;
-      string strand_by_polyAT;
-      //if read shorter than barcode, discard
-      if(tmpRead.Seq.length()<=maxDistToEnds){
-        tmpRead.INNER=-1;
-        tmpRead.OUTER=-1;
-        tmpRead.barcode="*";
-        tmpRead.barcodeStrand="*";
-        tmpRead.barcodeStart=-1;
-        tmpRead.barcodeMismatch=-1;
-        tmpRead.stat="Read_too_short";
-        tmpRead.printBarcodeInfo();
-        continue;
-      }
-      if(tmpRead.Kmers.size()==0){
-        tmpRead.genrateKmer(barcode_length);
-      }
-
-      //if (find polyA and 5')||(find polyT and 3'), means the barcode should be at left end
-      if((checkPolyAT(tmpRead)==0&&tech==5)||(checkPolyAT(tmpRead)==3&&tech==3)){
-        constant_seq_strand=0;
-        tmpRead.polyAT_containing=1;
-        if(tech==5){
-          inner_stat=isConstantSequenceContaining(tmpRead,TENX_TSO,maxDistToEnds,1,0);
-          outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,0);
-        }else if(tech==3){
-          inner_stat=isConstantSequenceContaining(tmpRead,POLYT,maxDistToEnds,0,0);
-          outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,0);
-        }else{
-          cout << "Failed, 5' or 3' not specified or specified a wrong argument";
-        }
-        if(inner_stat.first<0&&outer_stat.first<0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=-1;
-          kmer_index_start=0;
-          kmer_index_end=maxDistToEnds;
-        }else if(inner_stat.first>=0&&outer_stat.first<0){
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=-1;
-          kmer_index_start=0;
-          kmer_index_end=inner_stat.first;
-        }else if(inner_stat.first<0&&outer_stat.first>=0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=outer_stat.first+1;
-          kmer_index_start=outer_stat.first;
-          kmer_index_end=maxDistToEnds;
-        }else{
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=outer_stat.first+1;
-          kmer_index_start=outer_stat.first;
-          kmer_index_end=inner_stat.first;
-        }
-      //if (find polyT and 5')||(find polyA and 3'), means the barcode should be at right end
-      }else if((checkPolyAT(tmpRead)==3&&tech==5)||(checkPolyAT(tmpRead)==0&&tech==3)){
-        tmpRead.polyAT_containing=1;
-//        kmer_index_start=tmpRead.Seq.length()-maxDistToEnds;
-//        kmer_index_end=tmpRead.Seq.length()-barcode_length;
-        constant_seq_strand=3;
-        if(tech==5){
-          inner_stat=isConstantSequenceContaining(tmpRead,TENX_TSO,maxDistToEnds,1,3);
-          outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,3);
-        }else if(tech==3){
-          inner_stat=isConstantSequenceContaining(tmpRead,POLYT,maxDistToEnds,0,3);
-          outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,3);
-        }else{
-          cout << "Failed, 5' or 3' not specified or specified a wrong argument";
-        }
-        if(inner_stat.second<0&&outer_stat.second<0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=-1;
-          kmer_index_start=tmpRead.Seq.length()-maxDistToEnds;
-          kmer_index_end=tmpRead.Seq.length()-barcode_length;
-        }else if(inner_stat.second>=0&&outer_stat.second<0){
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=-1;
-          kmer_index_start=inner_stat.second;
-          kmer_index_end=tmpRead.Seq.length()-barcode_length;
-        }else if(inner_stat.second<0&&outer_stat.second>=0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=outer_stat.second+1;
-          kmer_index_start=tmpRead.Seq.length()-maxDistToEnds;
-          kmer_index_end=outer_stat.second;
-        }else{
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=outer_stat.second+1;
-          kmer_index_start=inner_stat.second;
-          kmer_index_end=outer_stat.second;
-        }
-      }else{
-        tmpRead.polyAT_containing=0;
-        if(tech==5){
-          inner_stat=isConstantSequenceContaining(tmpRead,TENX_TSO,maxDistToEnds,1,-1);
-          outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,-1);
-        }else if(tech==3){
-          inner_stat=isConstantSequenceContaining(tmpRead,POLYT,maxDistToEnds,0,-1);
-          outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,-1);
-        }else{
-          cout << "Failed, 5' or 3' not specified or specified a wrong argument";
-        }
-        if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second<0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=-1;
-          tmpRead.barcode="*";
-          tmpRead.barcodeStrand="*";
-          tmpRead.barcodeStart=-1;
-          tmpRead.barcodeMismatch=-1;
-          tmpRead.stat="ICS_R1_missing";
-          tmpRead.printBarcodeInfo();
-          continue;
-        }else if(inner_stat.first<0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second<0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=outer_stat.first+1;
-          kmer_index_start=outer_stat.first;
-          kmer_index_end=maxDistToEnds;
-          constant_seq_strand=0;
-        }else if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second>=0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=outer_stat.second+1;
-          kmer_index_start=tmpRead.Seq.length()-maxDistToEnds;
-          kmer_index_end=outer_stat.second;
-          constant_seq_strand=3;
-        }else if(inner_stat.first<0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second>=0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=-2;
-          tmpRead.barcode="*";
-          tmpRead.barcodeStrand="*";
-          tmpRead.barcodeStart=-1;
-          tmpRead.barcodeMismatch=-1;
-          tmpRead.stat="ICS_missing_R1_both_ends";
-          tmpRead.printBarcodeInfo();
-          continue;
-        }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second<0){
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=-1;
-          kmer_index_start=0;
-          kmer_index_end=inner_stat.first;
-          constant_seq_strand=0;
-        }else if(inner_stat.first>=0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second<0){
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=outer_stat.first+1;
-          kmer_index_start=outer_stat.first;
-          kmer_index_end=inner_stat.first;
-          constant_seq_strand=0;
-        }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second>=0){
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=outer_stat.second+1;
-          tmpRead.barcode="*";
-          tmpRead.barcodeStrand="*";
-          tmpRead.barcodeStart=-1;
-          tmpRead.barcodeMismatch=-1;
-          tmpRead.stat="ICS_R1_different_end";
-          tmpRead.printBarcodeInfo();
-          continue;
-        }else if(inner_stat.first>=0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second>=0){
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=outer_stat.first+1;
-          kmer_index_start=outer_stat.first;
-          kmer_index_end=inner_stat.first;
-          constant_seq_strand=0;
-        }else if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second<0){
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=-1;
-          kmer_index_start=inner_stat.second;
-          kmer_index_end=tmpRead.Seq.length()-barcode_length;
-          constant_seq_strand=3;
-        }else if(inner_stat.first<0&&outer_stat.first>=0&&inner_stat.second>=0&&outer_stat.second<0){
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=outer_stat.first+1;
-          tmpRead.barcode="*";
-          tmpRead.barcodeStrand="*";
-          tmpRead.barcodeStart=-1;
-          tmpRead.barcodeMismatch=-1;
-          tmpRead.stat="ICS_R1_different_end";
-          tmpRead.printBarcodeInfo();
-          continue;
-        }else if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second>=0){
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=outer_stat.second+1;
-          kmer_index_start=inner_stat.second;
-          kmer_index_end=outer_stat.second;
-          constant_seq_strand=3;
-        }else if(inner_stat.first<0&&outer_stat.first>=0&&inner_stat.second>=0&&outer_stat.second>=0){
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=outer_stat.second+1;
-          kmer_index_start=inner_stat.second;
-          kmer_index_end=outer_stat.second;
-          constant_seq_strand=3;
-        }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second<0){
-          tmpRead.INNER=-2;
-          tmpRead.OUTER=-1;
-          tmpRead.barcode="*";
-          tmpRead.barcodeStrand="*";
-          tmpRead.barcodeStart=-1;
-          tmpRead.barcodeMismatch=-1;
-          tmpRead.stat="ICS_both_ends_R1_missing";
-          tmpRead.printBarcodeInfo();
-          continue;
-        }else if(inner_stat.first>=0&&outer_stat.first>=0&&inner_stat.second>=0&&outer_stat.second<0){
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=outer_stat.first+1;
-          kmer_index_start=outer_stat.first;
-          kmer_index_end=inner_stat.first;
-          constant_seq_strand=0;
-        }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second>=0){
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=outer_stat.second+1;
-          kmer_index_start=inner_stat.second;
-          kmer_index_end=outer_stat.second;
-          constant_seq_strand=3;
-        }else{
-          if(inner_stat.first>outer_stat.first&&inner_stat.second<outer_stat.second){
-            tmpRead.INNER=-2;
-            tmpRead.OUTER=-2;
-            tmpRead.barcode="*";
-            tmpRead.barcodeStrand="*";
-            tmpRead.barcodeStart=-1;
-            tmpRead.barcodeMismatch=-1;
-            tmpRead.stat="ICS_R1_both_ends";
-            tmpRead.printBarcodeInfo();
-            continue;
-          }else if(inner_stat.first<outer_stat.first&&inner_stat.second<outer_stat.second){
-            tmpRead.INNER=inner_stat.second+1;
-            tmpRead.OUTER=outer_stat.second+1;
-            kmer_index_start=inner_stat.second;
-            kmer_index_end=outer_stat.second;
-            constant_seq_strand=3;
-          }else if(inner_stat.first>outer_stat.first&&inner_stat.second>outer_stat.second){
-            tmpRead.INNER=inner_stat.first+1;
-            tmpRead.OUTER=outer_stat.first+1;
-            kmer_index_start=outer_stat.first;
-            kmer_index_end=inner_stat.first;
-            constant_seq_strand=0;
-          }else{
-            tmpRead.INNER=-1;
-            tmpRead.OUTER=-1;
-            tmpRead.barcode="*";
-            tmpRead.barcodeStrand="*";
-            tmpRead.barcodeStart=-1;
-            tmpRead.barcodeMismatch=-1;
-            tmpRead.stat="ICS_R1_wrongly_oriented";
-            tmpRead.printBarcodeInfo();
-            continue;
-          }
-        }
-      }
-      if(kmer_index_start>kmer_index_end){
-        tmpRead.barcode="*";
-        tmpRead.barcodeStrand="*";
-        tmpRead.barcodeStart=-1;
-        tmpRead.barcodeMismatch=-1;
-        tmpRead.stat="ICS_R1_wrongly_oriented";
-        tmpRead.printBarcodeInfo();
-        continue;
-      }
-      std::vector<string> kmers;
-      //determine kmers by inner and outer constant seq start index
-      //cout << "determine kmers by inner and outer constant seq start index" << endl;
-      //cout << kmer_index_start << " " << kmer_index_end << " " << barcode_length << " " << tmpRead.Seq.length() << endl;
-      if((kmer_index_end+barcode_length-1>tmpRead.Seq.length())&&(kmer_index_start+barcode_length-1<tmpRead.Seq.length())){
-        kmers.insert(kmers.end(),tmpRead.Kmers.begin()+kmer_index_start,tmpRead.Kmers.end());
-      }else if(kmer_index_start+barcode_length-1>tmpRead.Seq.length()){
-        tmpRead.INNER=-1;
-        tmpRead.OUTER=1;
-        tmpRead.barcode="*";
-        tmpRead.barcodeStrand="*";
-        tmpRead.barcodeStart=-1;
-        tmpRead.barcodeMismatch=-1;
-        tmpRead.stat="R1_wrongly_oriented";
-        tmpRead.printBarcodeInfo();
-        continue;
-      }else{
-        kmers.insert(kmers.end(),tmpRead.Kmers.begin()+kmer_index_start,tmpRead.Kmers.begin()+kmer_index_end);
-      }
-      //cout << "ok" << endl;
-      //for kmers, try to find exact match in barcode list, else to find ambiguous match
-      for(int j=0;j<kmers.size();j++){
-        int index=kmer_index_start+j+1;
-        /*
-         if(j<=kmers.size()/2){
-         index=j+1;
-         }else{
-         index=Reads[i].Seq.length()-maxDistToEnds+j-(kmers.size()/2)+1;
-         }
-         */
-        if(barcodes.barcode_ori[kmers[j]].length()!=0&&constant_seq_strand==0){
-          tmpRead.barcode=kmers[j];
-          tmpRead.barcodeStrand="original";
-          tmpRead.barcodeStart=index;
-          tmpRead.barcodeMismatch=0;
-          tmpRead.stat="fine";
-          break;
-        }else if(barcodes.barcode_rc[kmers[j]].length()!=0&&constant_seq_strand==3){
-          tmpRead.barcode=barcodes.barcode_rc[kmers[j]];
-          tmpRead.barcodeStrand="reverse_complement";
-          tmpRead.barcodeStart=index;
-          tmpRead.barcodeMismatch=0;
-          tmpRead.stat="fine";
-          break;
-        }
-      }
-      //if exact match found, next read.
-      if(tmpRead.barcode.length()!=0){
-        //        cout << "exact hits found" << endl;
-        tmpRead.printBarcodeInfo();
-        fq_gz_write(outFile,tmpRead);
-        continue;
-        //start to find ambiguous match
-      }else{
-        //cout << "start to find ambiguous hits.." << endl;
-        for(int j=0;j<kmers.size();j++){
-          int index=kmer_index_start+j+1;
-          //calculate position of this kmer
-          /*
-           if(j<=kmers.size()/2){
-           index=j+1;
-           }else{
-           index=Reads[i].Seq.length()-maxDistToEnds+j-(kmers.size()/2)+1;
-           }
-           */
-          if(ambiguous_barcode[kmers[j]].seq.length()!=0&&ambiguous_barcode[kmers[j]].strand==constant_seq_strand){
-            tmpRead.barcode=ambiguous_barcode[kmers[j]].seq;
-            tmpRead.barcodeStrand=num_to_strand[constant_seq_strand];
-            tmpRead.barcodeStart=index;
-            tmpRead.barcodeMismatch=ambiguous_barcode[kmers[j]].mismatch;
-            tmpRead.stat="fine";
-            break;
-          }
-          vector<pair<int, int>> candidates;
-          vector<string> kmer_segment=getMaxComplexitySegments(kmers[j],segments);
-          for(int n=0;n<kmer_segment.size();n++){
-            string query=kmer_segment[n]+to_string(n)+to_string(constant_seq_strand);
-            candidates.insert(candidates.end(),barcodes.barcode_dict[query].begin(),barcodes.barcode_dict[query].end());
-          }
-          if(candidates.size()==0){
-            continue;
-          }else{
-            for(int m=0;m<candidates.size();m++){
-              int barcode_dict_index=candidates[m].first-1;
-              string candidate_ori=barcodes.barcodes[barcode_dict_index];
-              string candidate=barcodes.barcodes[barcode_dict_index];
-              int strand=candidates[m].second;
-              if(strand==1){
-                candidate=reverse(candidate);
-              }else if(strand==2){
-                candidate=complement(candidate);
-              }else if(strand==3){
-                candidate=reverse_complement(candidate);
-              }else{
-                if(strand!=0){
-                  cout << "Unsupported strand coding, Read: " << tmpRead.ID << ", kmer: " << kmers[j] << endl;
-                }
-              }
-              int mismatch=editDistance(candidate,kmers[j]);
-              //take care here!!!! once kmer meets the threshould, it will be considered to be the barcode, 
-              //even there may be better ones after it.
-              if(mismatch>maxMismatch){
-                continue;
-              }else{
-                tmpRead.barcode=candidate_ori;
-                tmpRead.barcodeStrand=num_to_strand[strand];
-                tmpRead.barcodeStart=index;
-                tmpRead.barcodeMismatch=mismatch;
-                tmpRead.stat="fine";
-                AmbiguousBarcode ambiguous_match;
-                ambiguous_match.seq=candidate_ori;
-                ambiguous_match.strand=strand;
-                ambiguous_match.mismatch=mismatch;
-                ambiguous_barcode[kmers[j]]=ambiguous_match;
-                break;
-              }
-            } //for(int m=0;m<candidates.size();m++)
-          }// if(candidates.size()==0) else
-        }//for(int j=0;j<kmers.size();j++)
-      }// if(tmpRead.barcode.length()!=0) else
-      //check again if barcodes found, if not, fill the field with '*'.
-      if(tmpRead.barcode.length()!=0){
-        tmpRead.printBarcodeInfo();
-        fq_gz_write(outFile,tmpRead);
-        continue;
-      }else{
-        tmpRead.barcode="*";
-        tmpRead.barcodeStrand="*";
-        tmpRead.barcodeStart=-1;
-        tmpRead.barcodeMismatch=-1;
-        tmpRead.stat="barcode_missing";
-        tmpRead.printBarcodeInfo();
-        continue;
-      }
+      Read* tmpRead=NULL;
+      tmpRead=new Read;
+      tmpRead->ID=seq->name.s;
+      tmpRead->Seq=seq->seq.s;
+      tmpRead->Quality=seq->qual.s;
+      thread t1(&Read::identifyBarcodes,tmpRead,barcodes,segments,maxDistToEnds,maxMismatch,tech,outFile);
+      t1.join();
+      delete tmpRead;
     } //while (kseq_read(seq) >= 0)
     kseq_destroy(seq);
     gzclose(outFile);
     gzclose(File);
   };
+   */
   
   void printReadIDs(){
     for(int i=0;i<Reads.size();++i){
@@ -822,408 +1326,22 @@ public:
     }
   }
   
-  void identifyBarcodes(BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds, int maxMismatch, int tech, const char* outputfilename){
-    int numReads=Reads.size();
-    int barcode_length=barcodes.barcodes[0].length();
-    gzFile outFile=gzopen(outputfilename, "wb2");
-    cout << "Identifying barcodes from " << numReads << " reads..." << endl;
-    for(int i=0;i<numReads;i++){
-      Read tmpRead=Reads[i];
-      int barcode_length=barcodes.barcodes[0].length();
-      int kmer_index_start=-1;
-      int kmer_index_end=-1;
-      int constant_seq_strand;
-      pair<int, int> inner_stat;
-      pair<int, int> outer_stat;
-      string strand_by_polyAT;
-      //if read shorter than barcode, discard
-      if(tmpRead.Seq.length()<=maxDistToEnds){
-        tmpRead.INNER=-1;
-        tmpRead.OUTER=-1;
-        tmpRead.barcode="*";
-        tmpRead.barcodeStrand="*";
-        tmpRead.barcodeStart=-1;
-        tmpRead.barcodeMismatch=-1;
-        tmpRead.stat="Read_too_short";
-        tmpRead.printBarcodeInfo();
-        continue;
-      }
-      if(tmpRead.Kmers.size()==0){
-        tmpRead.genrateKmer(barcode_length);
-      }
-      
-      //if (find polyA and 5')||(find polyT and 3'), means the barcode should be at left end
-      if((checkPolyAT(tmpRead)==0&&tech==5)||(checkPolyAT(tmpRead)==3&&tech==3)){
-        constant_seq_strand=0;
-        tmpRead.polyAT_containing=1;
-        if(tech==5){
-          inner_stat=isConstantSequenceContaining(tmpRead,TENX_TSO,maxDistToEnds,1,0);
-          outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,0);
-        }else if(tech==3){
-          inner_stat=isConstantSequenceContaining(tmpRead,POLYT,maxDistToEnds,0,0);
-          outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,0);
-        }else{
-          cout << "Failed, 5' or 3' not specified or specified a wrong argument";
-        }
-        if(inner_stat.first<0&&outer_stat.first<0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=-1;
-          kmer_index_start=0;
-          kmer_index_end=maxDistToEnds;
-        }else if(inner_stat.first>=0&&outer_stat.first<0){
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=-1;
-          kmer_index_start=0;
-          kmer_index_end=inner_stat.first;
-        }else if(inner_stat.first<0&&outer_stat.first>=0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=outer_stat.first+1;
-          kmer_index_start=outer_stat.first;
-          kmer_index_end=maxDistToEnds;
-        }else{
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=outer_stat.first+1;
-          kmer_index_start=outer_stat.first;
-          kmer_index_end=inner_stat.first;
-        }
-        //if (find polyT and 5')||(find polyA and 3'), means the barcode should be at right end
-      }else if((checkPolyAT(tmpRead)==3&&tech==5)||(checkPolyAT(tmpRead)==0&&tech==3)){
-        tmpRead.polyAT_containing=1;
-        //        kmer_index_start=tmpRead.Seq.length()-maxDistToEnds;
-        //        kmer_index_end=tmpRead.Seq.length()-barcode_length;
-        constant_seq_strand=3;
-        if(tech==5){
-          inner_stat=isConstantSequenceContaining(tmpRead,TENX_TSO,maxDistToEnds,1,3);
-          outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,3);
-        }else if(tech==3){
-          inner_stat=isConstantSequenceContaining(tmpRead,POLYT,maxDistToEnds,0,3);
-          outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,3);
-        }else{
-          cout << "Failed, 5' or 3' not specified or specified a wrong argument";
-        }
-        if(inner_stat.second<0&&outer_stat.second<0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=-1;
-          kmer_index_start=tmpRead.Seq.length()-maxDistToEnds;
-          kmer_index_end=tmpRead.Seq.length()-barcode_length;
-        }else if(inner_stat.second>=0&&outer_stat.second<0){
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=-1;
-          kmer_index_start=inner_stat.second;
-          kmer_index_end=tmpRead.Seq.length()-barcode_length;
-        }else if(inner_stat.second<0&&outer_stat.second>=0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=outer_stat.second+1;
-          kmer_index_start=tmpRead.Seq.length()-maxDistToEnds;
-          kmer_index_end=outer_stat.second;
-        }else{
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=outer_stat.second+1;
-          kmer_index_start=inner_stat.second;
-          kmer_index_end=outer_stat.second;
-        }
-      }else{
-        tmpRead.polyAT_containing=0;
-        if(tech==5){
-          inner_stat=isConstantSequenceContaining(tmpRead,TENX_TSO,maxDistToEnds,1,-1);
-          outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,-1);
-        }else if(tech==3){
-          inner_stat=isConstantSequenceContaining(tmpRead,POLYT,maxDistToEnds,0,-1);
-          outer_stat=isConstantSequenceContaining(tmpRead,TENX_R1,maxDistToEnds,2,-1);
-        }else{
-          cout << "Failed, 5' or 3' not specified or specified a wrong argument";
-        }
-        if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second<0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=-1;
-          tmpRead.barcode="*";
-          tmpRead.barcodeStrand="*";
-          tmpRead.barcodeStart=-1;
-          tmpRead.barcodeMismatch=-1;
-          tmpRead.stat="ICS_R1_missing";
-          tmpRead.printBarcodeInfo();
-          continue;
-        }else if(inner_stat.first<0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second<0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=outer_stat.first+1;
-          kmer_index_start=outer_stat.first;
-          kmer_index_end=maxDistToEnds;
-          constant_seq_strand=0;
-        }else if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second>=0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=outer_stat.second+1;
-          kmer_index_start=tmpRead.Seq.length()-maxDistToEnds;
-          kmer_index_end=outer_stat.second;
-          constant_seq_strand=3;
-        }else if(inner_stat.first<0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second>=0){
-          tmpRead.INNER=-1;
-          tmpRead.OUTER=-2;
-          tmpRead.barcode="*";
-          tmpRead.barcodeStrand="*";
-          tmpRead.barcodeStart=-1;
-          tmpRead.barcodeMismatch=-1;
-          tmpRead.stat="ICS_missing_R1_both_ends";
-          tmpRead.printBarcodeInfo();
-          continue;
-        }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second<0){
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=-1;
-          kmer_index_start=0;
-          kmer_index_end=inner_stat.first;
-          constant_seq_strand=0;
-        }else if(inner_stat.first>=0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second<0){
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=outer_stat.first+1;
-          kmer_index_start=outer_stat.first;
-          kmer_index_end=inner_stat.first;
-          constant_seq_strand=0;
-        }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second>=0){
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=outer_stat.second+1;
-          tmpRead.barcode="*";
-          tmpRead.barcodeStrand="*";
-          tmpRead.barcodeStart=-1;
-          tmpRead.barcodeMismatch=-1;
-          tmpRead.stat="ICS_R1_different_end";
-          tmpRead.printBarcodeInfo();
-          continue;
-        }else if(inner_stat.first>=0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second>=0){
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=outer_stat.first+1;
-          kmer_index_start=outer_stat.first;
-          kmer_index_end=inner_stat.first;
-          constant_seq_strand=0;
-        }else if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second<0){
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=-1;
-          kmer_index_start=inner_stat.second;
-          kmer_index_end=tmpRead.Seq.length()-barcode_length;
-          constant_seq_strand=3;
-        }else if(inner_stat.first<0&&outer_stat.first>=0&&inner_stat.second>=0&&outer_stat.second<0){
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=outer_stat.first+1;
-          tmpRead.barcode="*";
-          tmpRead.barcodeStrand="*";
-          tmpRead.barcodeStart=-1;
-          tmpRead.barcodeMismatch=-1;
-          tmpRead.stat="ICS_R1_different_end";
-          tmpRead.printBarcodeInfo();
-          continue;
-        }else if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second>=0){
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=outer_stat.second+1;
-          kmer_index_start=inner_stat.second;
-          kmer_index_end=outer_stat.second;
-          constant_seq_strand=3;
-        }else if(inner_stat.first<0&&outer_stat.first>=0&&inner_stat.second>=0&&outer_stat.second>=0){
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=outer_stat.second+1;
-          kmer_index_start=inner_stat.second;
-          kmer_index_end=outer_stat.second;
-          constant_seq_strand=3;
-        }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second<0){
-          tmpRead.INNER=-2;
-          tmpRead.OUTER=-1;
-          tmpRead.barcode="*";
-          tmpRead.barcodeStrand="*";
-          tmpRead.barcodeStart=-1;
-          tmpRead.barcodeMismatch=-1;
-          tmpRead.stat="ICS_both_ends_R1_missing";
-          tmpRead.printBarcodeInfo();
-          continue;
-        }else if(inner_stat.first>=0&&outer_stat.first>=0&&inner_stat.second>=0&&outer_stat.second<0){
-          tmpRead.INNER=inner_stat.first+1;
-          tmpRead.OUTER=outer_stat.first+1;
-          kmer_index_start=outer_stat.first;
-          kmer_index_end=inner_stat.first;
-          constant_seq_strand=0;
-        }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second>=0){
-          tmpRead.INNER=inner_stat.second+1;
-          tmpRead.OUTER=outer_stat.second+1;
-          kmer_index_start=inner_stat.second;
-          kmer_index_end=outer_stat.second;
-          constant_seq_strand=3;
-        }else{
-          if(inner_stat.first>outer_stat.first&&inner_stat.second<outer_stat.second){
-            tmpRead.INNER=-2;
-            tmpRead.OUTER=-2;
-            tmpRead.barcode="*";
-            tmpRead.barcodeStrand="*";
-            tmpRead.barcodeStart=-1;
-            tmpRead.barcodeMismatch=-1;
-            tmpRead.stat="ICS_R1_both_ends";
-            tmpRead.printBarcodeInfo();
-            continue;
-          }else if(inner_stat.first<outer_stat.first&&inner_stat.second<outer_stat.second){
-            tmpRead.INNER=inner_stat.second+1;
-            tmpRead.OUTER=outer_stat.second+1;
-            kmer_index_start=inner_stat.second;
-            kmer_index_end=outer_stat.second;
-            constant_seq_strand=3;
-          }else if(inner_stat.first>outer_stat.first&&inner_stat.second>outer_stat.second){
-            tmpRead.INNER=inner_stat.first+1;
-            tmpRead.OUTER=outer_stat.first+1;
-            kmer_index_start=outer_stat.first;
-            kmer_index_end=inner_stat.first;
-            constant_seq_strand=0;
-          }else{
-            tmpRead.INNER=-1;
-            tmpRead.OUTER=-1;
-            tmpRead.barcode="*";
-            tmpRead.barcodeStrand="*";
-            tmpRead.barcodeStart=-1;
-            tmpRead.barcodeMismatch=-1;
-            tmpRead.stat="ICS_R1_wrongly_oriented";
-            tmpRead.printBarcodeInfo();
-            continue;
-          }
+  void identifyBarcodesinBlock(vector<Read>& blockreads,BarcodeFile& barcode,vector<int> segments,int maxDistToEnds,int maxMismatch,int tech){
+    for(int i=0;i<blockreads.size();++i){
+      blockreads[i].identifyBarcodes(barcode,segments,maxDistToEnds,maxMismatch,tech);
+    }
+  }
+  
+  void writeReadData(vector<vector<Read>>& readmatrix,std::stringstream &readinfostream, std::stringstream &filteredfastqstream, std::stringstream &trimfilteredfastqstream){
+    for(int i=0;i<readmatrix.size();++i){
+      for(int j=0;j<readmatrix[i].size();++j){
+        readmatrix[i][j].printBarcodeInfo(readinfostream);
+        if(readmatrix[i][j].barcode!="*"){
+          readmatrix[i][j].fq_gz_write(filteredfastqstream,false);
+          readmatrix[i][j].fq_gz_write(trimfilteredfastqstream,true);
         }
       }
-      if(kmer_index_start>kmer_index_end){
-        tmpRead.barcode="*";
-        tmpRead.barcodeStrand="*";
-        tmpRead.barcodeStart=-1;
-        tmpRead.barcodeMismatch=-1;
-        tmpRead.stat="ICS_R1_wrongly_oriented";
-        tmpRead.printBarcodeInfo();
-        continue;
-      }
-      std::vector<string> kmers;
-      //determine kmers by inner and outer constant seq start index
-      //cout << "determine kmers by inner and outer constant seq start index" << endl;
-      //cout << kmer_index_start << " " << kmer_index_end << " " << barcode_length << " " << tmpRead.Seq.length() << endl;
-      if((kmer_index_end+barcode_length-1>tmpRead.Seq.length())&&(kmer_index_start+barcode_length-1<tmpRead.Seq.length())){
-        kmers.insert(kmers.end(),tmpRead.Kmers.begin()+kmer_index_start,tmpRead.Kmers.end());
-      }else if(kmer_index_start+barcode_length-1>tmpRead.Seq.length()){
-        tmpRead.INNER=-1;
-        tmpRead.OUTER=1;
-        tmpRead.barcode="*";
-        tmpRead.barcodeStrand="*";
-        tmpRead.barcodeStart=-1;
-        tmpRead.barcodeMismatch=-1;
-        tmpRead.stat="R1_wrongly_oriented";
-        tmpRead.printBarcodeInfo();
-        continue;
-      }else{
-        kmers.insert(kmers.end(),tmpRead.Kmers.begin()+kmer_index_start,tmpRead.Kmers.begin()+kmer_index_end);
-      }
-      //cout << "ok" << endl;
-      //for kmers, try to find exact match in barcode list, else to find ambiguous match
-      for(int j=0;j<kmers.size();j++){
-        int index=kmer_index_start+j+1;
-        /*
-         if(j<=kmers.size()/2){
-         index=j+1;
-         }else{
-         index=Reads[i].Seq.length()-maxDistToEnds+j-(kmers.size()/2)+1;
-         }
-         */
-        if(barcodes.barcode_ori[kmers[j]].length()!=0&&constant_seq_strand==0){
-          tmpRead.barcode=kmers[j];
-          tmpRead.barcodeStrand="original";
-          tmpRead.barcodeStart=index;
-          tmpRead.barcodeMismatch=0;
-          tmpRead.stat="fine";
-          break;
-        }else if(barcodes.barcode_rc[kmers[j]].length()!=0&&constant_seq_strand==3){
-          tmpRead.barcode=barcodes.barcode_rc[kmers[j]];
-          tmpRead.barcodeStrand="reverse_complement";
-          tmpRead.barcodeStart=index;
-          tmpRead.barcodeMismatch=0;
-          tmpRead.stat="fine";
-          break;
-        }
-      }
-      //if exact match found, next read.
-      if(tmpRead.barcode.length()!=0){
-        //        cout << "exact hits found" << endl;
-        tmpRead.printBarcodeInfo();
-        fq_gz_write(outFile,tmpRead);
-        continue;
-        //start to find ambiguous match
-      }else{
-        //cout << "start to find ambiguous hits.." << endl;
-        for(int j=0;j<kmers.size();j++){
-          int index=kmer_index_start+j+1;
-          //calculate position of this kmer
-          /*
-           if(j<=kmers.size()/2){
-           index=j+1;
-           }else{
-           index=Reads[i].Seq.length()-maxDistToEnds+j-(kmers.size()/2)+1;
-           }
-           */
-          if(ambiguous_barcode[kmers[j]].seq.length()!=0&&ambiguous_barcode[kmers[j]].strand==constant_seq_strand){
-            tmpRead.barcode=ambiguous_barcode[kmers[j]].seq;
-            tmpRead.barcodeStrand=num_to_strand[constant_seq_strand];
-            tmpRead.barcodeStart=index;
-            tmpRead.barcodeMismatch=ambiguous_barcode[kmers[j]].mismatch;
-            tmpRead.stat="fine";
-            break;
-          }
-          vector<pair<int, int>> candidates;
-          vector<string> kmer_segment=getMaxComplexitySegments(kmers[j],segments);
-          for(int n=0;n<kmer_segment.size();n++){
-            string query=kmer_segment[n]+to_string(n)+to_string(constant_seq_strand);
-            candidates.insert(candidates.end(),barcodes.barcode_dict[query].begin(),barcodes.barcode_dict[query].end());
-          }
-          if(candidates.size()==0){
-            continue;
-          }else{
-            for(int m=0;m<candidates.size();m++){
-              int barcode_dict_index=candidates[m].first-1;
-              string candidate_ori=barcodes.barcodes[barcode_dict_index];
-              string candidate=barcodes.barcodes[barcode_dict_index];
-              int strand=candidates[m].second;
-              if(strand==1){
-                candidate=reverse(candidate);
-              }else if(strand==2){
-                candidate=complement(candidate);
-              }else if(strand==3){
-                candidate=reverse_complement(candidate);
-              }else{
-                if(strand!=0){
-                  cout << "Unsupported strand coding, Read: " << tmpRead.ID << ", kmer: " << kmers[j] << endl;
-                }
-              }
-              int mismatch=editDistance(candidate,kmers[j]);
-              //take care here!!!! once kmer meets the threshould, it will be considered to be the barcode, 
-              //even there may be better ones after it.
-              if(mismatch>maxMismatch){
-                continue;
-              }else{
-                tmpRead.barcode=candidate_ori;
-                tmpRead.barcodeStrand=num_to_strand[strand];
-                tmpRead.barcodeStart=index;
-                tmpRead.barcodeMismatch=mismatch;
-                tmpRead.stat="fine";
-                AmbiguousBarcode ambiguous_match;
-                ambiguous_match.seq=candidate_ori;
-                ambiguous_match.strand=strand;
-                ambiguous_match.mismatch=mismatch;
-                ambiguous_barcode[kmers[j]]=ambiguous_match;
-                break;
-              }
-            } //for(int m=0;m<candidates.size();m++)
-          }// if(candidates.size()==0) else
-        }//for(int j=0;j<kmers.size();j++)
-      }// if(tmpRead.barcode.length()!=0) else
-      //check again if barcodes found, if not, fill the field with '*'.
-      if(tmpRead.barcode.length()!=0){
-        tmpRead.printBarcodeInfo();
-        fq_gz_write(outFile,tmpRead);
-        continue;
-      }else{
-        tmpRead.barcode="*";
-        tmpRead.barcodeStrand="*";
-        tmpRead.barcodeStart=-1;
-        tmpRead.barcodeMismatch=-1;
-        tmpRead.stat="barcode_missing";
-        tmpRead.printBarcodeInfo();
-        continue;
-      }
-    } //for(int i=0;i<numReads;i++){
-    gzclose(outFile);
-  } //void identifyBarcodes
+    }
+  }
 }; //class ReadFile
 

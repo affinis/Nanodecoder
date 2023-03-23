@@ -136,9 +136,7 @@ int main(int argc, char *argv[]){
           pair<int,int> clip_pos;
           pair<int,int> SA_clip_pos;
           read_bc2gene.erase(read_bc);
-          chimera[read_bc]=read_bc;
           string readid=(tokenize(read_bc,'_'))[0];
-          chimeraReadlist << readid << endl;
 //          cout << "debug1" << endl;
           string cigar=fields[5];
 //          cout << "debug2" << endl;
@@ -153,7 +151,17 @@ int main(int argc, char *argv[]){
 //         cout << "debug5" << endl;
           SA_clip_pos=findClip(SA_fields[3]);
 //          cout << "debug6" << endl;
-          chimeraReadMappingStat << read_bc << "\t" << clip_pos.first << "\t" << cigar << "\t" << clip_pos.second << "\t" << SA_clip_pos.first << "\t" << SA_fields[3] << "\t" << SA_clip_pos.second << endl;
+          if(clip_pos.first>=SA_clip_pos.first&&clip_pos.second>=SA_clip_pos.second){
+            read_bc2gene[read_bc]=id2name[SA_fields[0].replace(0,5,"")];
+            continue;
+          }else if(clip_pos.first<=SA_clip_pos.first&&clip_pos.second<=SA_clip_pos.second){
+            read_bc2gene[read_bc]=ref;
+            continue;
+          }else{
+            chimeraReadMappingStat << read_bc << "\t" << clip_pos.first << "\t" << cigar << "\t" << clip_pos.second << "\t" << SA_clip_pos.first << "\t" << SA_fields[3] << "\t" << SA_clip_pos.second << endl;
+            chimera[read_bc]=read_bc;
+            chimeraReadlist << readid << endl;  
+          }
         }else{
           continue;
         } //if(flag>=2048)

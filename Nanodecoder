@@ -24,6 +24,7 @@ Optional:
 	-w	barcode whitelist (default: 700k barcode whitelist from 10x genomics)
 	-m	mismatch (default: 1)
 	-l	barcode search range (default: 100)
+	-@	number of thread used (default: 4)
 
 See 'https://github.com/affinis/Nanodecoder' for further description.
 EOF
@@ -37,8 +38,9 @@ fi
 barcode_white_list=$SC_PATH/whitelists/700kBarcode.lst
 barcode_search_range=100
 mismatch=1
+thread=4
 
-while getopts hi:t:w:r:l:m: options
+while getopts hi:t:w:r:l:m:@: options
 do
 	case $options in
 	h)
@@ -63,6 +65,9 @@ do
 	m)
 		mismatch=$OPTARG
 		;;
+	@)
+		thread=$OPTARG
+		;;
 	*)
 		echo "$HELP"
 		exit
@@ -70,10 +75,10 @@ do
 	esac
 done
 
-echo "Input fastq: $fastq_filename, tech $tech, barcodeWhiteList $barcode_white_list, range: $barcode_search_range, mismatch $mismatch"
+echo "Input fastq: $fastq_filename, tech $tech, barcodeWhiteList $barcode_white_list, range: $barcode_search_range, mismatch $mismatch, thread $thread"
 
 #initial processing of reads, filter reads that do not contain R1 and/or TSO, output: read_summary.tsv, filtered.fastq.gz
-$nanodecoder -f $fastq_filename -t $tech -b $barcode_white_list -r $barcode_search_range -m $mismatch > read_summary.tsv
+$nanodecoder -f $fastq_filename -t $tech -b $barcode_white_list -r $barcode_search_range -m $mismatch -@ $thread > read_summary.tsv
 
 #seqence alignment, output: aln.sam
 $minimap2 -ax splice -uf -k14 $reference_for_minimap2 filtered.fastq.gz > aln.sam
@@ -85,8 +90,8 @@ $samprocessor -f aln.sam -m $SC_PATH/IDs2Names.tsv
 zgrep -f chimeric_read_ids.lst -A 3 filtered.fastq.gz | grep -v '^--$' > chimeric_read.fastq
 grep -f chimeric_read_ids.lst -w read_summary.tsv > chimeric_read_init_summary.tsv
 
-#split chimera, output: chimeric_filtered.fastq.gz, splited_read_summary.tsv
-$chimeraSaver -f chimeric_read.fastq -m chimera_mapping_stat.tsv -s chimeric_read_init_summary.tsv -d $mismatch -l $barcode_search_range -t $tech -b $barcode_white_list > splited_read_summary.tsv
+#split chimera, output: read_split_report.tsv, chimeric_filtered.fastq.gz, splited_read_summary.tsv
+$chimeraSaver -f chimeric_read.fastq -s chimeric_read_init_summary.tsv -d $mismatch -l $barcode_search_range -t $tech -b $barcode_white_list > splited_read_summary.tsv
 
 #align splited reads
 $minimap2 -ax splice -uf -k14 $reference_for_minimap2 chimeric_filtered.fastq.gz > splited.aln.sam
