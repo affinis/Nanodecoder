@@ -330,6 +330,15 @@ vector<int> getMaxComplexityWordSizes(int total_length, int num_segments){
   return word_sizes;
   }
 
+vector<int> seq2CurrentLevels(string& seq, std::unordered_map<string, int>& current_table){
+  vector<string> Sixmers=genrateKmerFromSeq(seq,6);
+  vector<int> current_levels;
+  for(string kmer:Sixmers){
+    current_levels.push_back(current_table[kmer]);
+  }
+  return(current_levels);
+}
+
 /*
 vector<int> kmerDistancesMultithreads(string& queryseq, vector<string>& kmers){
   int numKmers=kmers.size();
