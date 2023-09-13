@@ -15,6 +15,9 @@
 
 #include "kseq.h"
 #include "prosessSeq.hpp"
+#include "UCR_DTW2.h"
+#include "pore_model.h"
+#include "decoder.h"
 
 using std::unordered_map;
 using std::ifstream;
@@ -42,6 +45,7 @@ class BarcodeFile{
 public:
   ifstream barcodeFile;
   vector<string> barcodes;
+  string barcoedefilename;
   unordered_map<string, vector<pair<int, int>>> barcode_dict;
   unordered_map<string, string> barcode_ori;
   unordered_map<string, string> barcode_rc;
@@ -52,13 +56,21 @@ public:
   
   BarcodeFile(const BarcodeFile& source){
     barcodes=source.barcodes;
+    barcoedefilename=source.barcoedefilename;
     barcode_dict=source.barcode_dict;
     barcode_ori=source.barcode_ori;
     barcode_rc=source.barcode_rc;
   }
   
+  ~BarcodeFile(){
+
+  }
+  
   BarcodeFile(const char* filename, vector<int> word_sizes, int barcode_length){
     barcodeFile.open(filename);
+    barcoedefilename=(string)filename;
+    fprintf(stderr,"BarcodeFile: filename %s\n",barcoedefilename.c_str());
+    fprintf(stderr,"BarcodeFile: Loading barcodes and building dicts...\n");
     while(!barcodeFile.eof()){
       string barcode;
       getline(barcodeFile,barcode,'\n');
@@ -90,7 +102,12 @@ public:
       for(int j=0;j<barcode_segments_rc.size();j++){
         string key;
         pair<int, int> barcode_value;
-        key=barcode_segments[j]+to_string(j)+to_string(3);
+        key=barcode_segments_rc[j]+to_string(j)+to_string(3);
+        /*
+        if(barcode=="AAACAACGAATAGTTC"){
+          cout << key << endl;
+        }
+        */
         barcode_value.first=barcodes.size();
         barcode_value.second=3;
         barcode_dict[key].push_back(barcode_value);
@@ -122,7 +139,7 @@ public:
   int OUTER;
   int INNER;
   vector<string> Kmers;
-  int barcodeStart;
+  int barcodeStart=-1;
   string barcode;
   string barcodeStrand;
   int fusionpoint;
@@ -269,12 +286,16 @@ public:
     return best_align.first;
   }
   
-  pair<int, int> isConstantSequenceContaining(string& constantseq, int testRange, int max_testseq_mismatch, int strand){
+  pair<int, int> isConstantSequenceContaining(string& constantseq, int testRange, int max_testseq_mismatch, int strand, bool loose=false){
     string testForward;
     string testseq;
     string testReverse;
     string testseq_rc;
     pair<int, int> res;
+    //try to loose the standard
+    if(loose){
+      max_testseq_mismatch=max_testseq_mismatch+1;
+    }
 //    vector<string> testsegF;
 //    vector<string> testsegR;
 //    int segments=max_testseq_mismatch+1;
@@ -352,7 +373,7 @@ public:
       }
     }
   
-  int identifyBarcodes(BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds, int maxMismatch, int tech){
+  int identifyBarcodes(BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds, int maxMismatch, int tech, const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false){
     int barcode_length=barcodes.barcodes[0].length();
     int kmer_index_start=-1;
     int kmer_index_end=-1;
@@ -366,6 +387,19 @@ public:
       umiLength=12;
     }else{
       umiLength=10;
+    }
+    
+    //if read too long, discard it
+    if(this->Seq.length()>=100000){
+      this->INNER=-1;
+      this->OUTER=-1;
+      this->barcode="*";
+      this->barcodeStrand="*";
+      this->barcodeStart=-1;
+      this->barcodeMismatch=-1;
+      this->stat="Read_too_long";
+      //      this->printBarcodeInfo();
+      return 0;
     }
     
     //if read shorter than barcode search range * 2, discard
@@ -389,10 +423,10 @@ public:
       this->polyAT_containing=1;
       if(tech==5){
         inner_stat=isConstantSequenceContaining(TENX_TSO,maxDistToEnds,2,0);
-        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,0);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,0,true);
       }else if(tech==3){
         inner_stat=isConstantSequenceContaining(POLYT,maxDistToEnds,0,0);
-        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,0);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,0,true);
       }else{
         cout << "Failed, 5' or 3' not specified or specified a wrong argument";
       }
@@ -423,10 +457,10 @@ public:
       constant_seq_strand=3;
       if(tech==5){
         inner_stat=isConstantSequenceContaining(TENX_TSO,maxDistToEnds,2,3);
-        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,3);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,3,true);
       }else if(tech==3){
         inner_stat=isConstantSequenceContaining(POLYT,maxDistToEnds,0,3);
-        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,3);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,3,true);
       }else{
         cout << "Failed, 5' or 3' not specified or specified a wrong argument";
       }
@@ -455,10 +489,10 @@ public:
       this->polyAT_containing=0;
       if(tech==5){
         inner_stat=isConstantSequenceContaining(TENX_TSO,maxDistToEnds,2,-1);
-        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,-1);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,-1,true);
       }else if(tech==3){
         inner_stat=isConstantSequenceContaining(POLYT,maxDistToEnds,0,-1);
-        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,-1);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,-1,true);
       }else{
         cout << "Failed, 5' or 3' not specified or specified a wrong argument";
       }
@@ -491,7 +525,8 @@ public:
         this->barcodeStrand="*";
         this->barcodeStart=-1;
         this->barcodeMismatch=-1;
-        this->stat="ICS_missing_R1_both_ends";
+//        this->stat="ICS_missing_R1_both_ends";
+        this->stat="Dual_header";
 //        this->printBarcodeInfo();
         return 0;
       }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second<0){
@@ -513,7 +548,8 @@ public:
         this->barcodeStrand="*";
         this->barcodeStart=-1;
         this->barcodeMismatch=-1;
-        this->stat="ICS_R1_different_end";
+//        this->stat="ICS_R1_different_end";
+        this->stat="Dual_header";
 //        this->printBarcodeInfo();
         return 0;
       }else if(inner_stat.first>=0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second>=0){
@@ -535,7 +571,8 @@ public:
         this->barcodeStrand="*";
         this->barcodeStart=-1;
         this->barcodeMismatch=-1;
-        this->stat="ICS_R1_different_end";
+//        this->stat="ICS_R1_different_end";
+        this->stat="Dual_header";
 //        this->printBarcodeInfo();
         return 0;
       }else if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second>=0){
@@ -557,7 +594,8 @@ public:
         this->barcodeStrand="*";
         this->barcodeStart=-1;
         this->barcodeMismatch=-1;
-        this->stat="ICS_both_ends_R1_missing";
+//        this->stat="ICS_both_ends_R1_missing";
+        this->stat="Dual_header";
 //        this->printBarcodeInfo();
         return 0;
       }else if(inner_stat.first>=0&&outer_stat.first>=0&&inner_stat.second>=0&&outer_stat.second<0){
@@ -580,7 +618,8 @@ public:
           this->barcodeStrand="*";
           this->barcodeStart=-1;
           this->barcodeMismatch=-1;
-          this->stat="ICS_R1_both_ends";
+//          this->stat="ICS_R1_both_ends";
+          this->stat="Dual_header";
 //          this->printBarcodeInfo();
           return 0;
         }else if(inner_stat.first<outer_stat.first&&inner_stat.second<outer_stat.second){
@@ -602,7 +641,8 @@ public:
           this->barcodeStrand="*";
           this->barcodeStart=-1;
           this->barcodeMismatch=-1;
-          this->stat="ICS_R1_wrongly_oriented";
+//          this->stat="ICS_R1_wrongly_oriented";
+          this->stat="Dual_header";
 //          this->printBarcodeInfo();
           return 0;
         }
@@ -639,7 +679,8 @@ public:
         this->barcodeStrand="*";
         this->barcodeStart=-1;
         this->barcodeMismatch=-1;
-        this->stat="CS_too_close_to_end_or_to_each_other";
+//        this->stat="CS_too_close_to_end_or_to_each_other";
+        this->stat="Read_too_short";
         return 0;
       }else{
         kmer_index_start=this->INNER-1-barcode_length-umiLength-4;
@@ -658,7 +699,8 @@ public:
         this->barcodeStrand="*";
         this->barcodeStart=-1;
         this->barcodeMismatch=-1;
-        this->stat="CS_too_close_to_end_or_to_each_other";
+//        this->stat="CS_too_close_to_end_or_to_each_other";
+        this->stat="Read_too_short";
         return 0;
       }else{
         kmer_index_start=this->INNER-1+TENX_TSO.length()+umiLength-4;
@@ -686,29 +728,11 @@ public:
       this->barcodeStrand="*";
       this->barcodeStart=-1;
       this->barcodeMismatch=-1;
-      this->stat="CS_too_close_to_end_or_to_each_other";
+//      this->stat="CS_too_close_to_end_or_to_each_other";
+      this->stat="Read_too_short";
       return 0;
     }
     
-/*
-    if((kmer_index_end+barcode_length-1>this->Seq.length())&&(kmer_index_start+barcode_length-1<this->Seq.length())){
-      kmers.insert(kmers.end(),this->Kmers.begin()+kmer_index_start,this->Kmers.end());
-    }else if(kmer_index_start+barcode_length-1>this->Seq.length()){
-      this->INNER=-1;
-      this->OUTER=1;
-      this->barcode="*";
-      this->barcodeStrand="*";
-      this->barcodeStart=-1;
-      this->barcodeMismatch=-1;
-      this->stat="R1_wrongly_oriented";
-//      this->printBarcodeInfo();
-      return 0;
-    }else{
-      //if constant seqs at left end
-      kmers.insert(kmers.end(),this->Kmers.begin()+kmer_index_start+TENX_R1.length()-2,this->Kmers.begin()+kmer_index_end-barcode_length-TENX_TSO.length()+2);
-    }
- */
-    //cout << "ok" << endl;
     //for kmers, try to find exact match in barcode list, else to find ambiguous match
     for(int j=0;j<kmers.size();j++){
       int index=kmer_index_start+j+1;
@@ -757,11 +781,22 @@ public:
       //cout << "start to find ambiguous hits.." << endl;
       for(int j=0;j<kmers.size();j++){
         int index=kmer_index_start+j+1;
+        //cout << kmers[j] << endl;
+        //first is index in barcodes.barcode_dict, second is strand
         vector<pair<int, int>> candidates;
         vector<string> kmer_segment=getMaxComplexitySegments(kmers[j],segments);
         for(int n=0;n<kmer_segment.size();n++){
           string query=kmer_segment[n]+to_string(n)+to_string(constant_seq_strand);
           candidates.insert(candidates.end(),barcodes.barcode_dict[query].begin(),barcodes.barcode_dict[query].end());
+          /*
+          if(kmers[j]=="AACTTATTCGTTGTTT"){
+            cout << query << endl;
+            vector<pair<int,int>> outs=barcodes.barcode_dict[query];
+            for(int i=0;i<outs.size();++i){
+              cout << barcodes.barcodes[outs[i].first-1] << endl;
+            }
+          }
+           */
         }
         if(candidates.size()==0){
           continue;
@@ -817,10 +852,19 @@ public:
       this->barcodeMismatch=barcode_mismatches[minPosition];
     }
     
-    if(this->barcode.length()!=0){
+    //if barcode can not be found through alignment based method, use DTW instead 
+    if((this->barcode.length()==0||this->barcode.length()==1)&&dtw){
+//      cout << "identify BC: read " << this->ID << " started DTW staff" << endl;
+      this->identifybarcodesDTW(wl_db,model);
+    }
+    
+    if(this->barcode.length()!=0&&this->barcode.length()!=1&&this->barcodeStart!=-1){
     //substring to generate a seq downstream barcode for 10nt as UMI, 
     //and modify reverse_com seq to original one, cut off adapter to UMI
+        //cout << this->barcodeStart << endl;
         this->guessUMI(tech);
+    }else if(this->barcode.length()==barcode_length){
+      return 0;
     }else{
       this->barcode="*";
       this->barcodeStrand="*";
@@ -873,6 +917,149 @@ private:
       return;
     }
   } //guessUMI
+  
+  void identifybarcodesDTW(WL_DB *wl_db, const entry_t *model){
+    long max_size=100000;
+    level_t lvl[max_size];
+    char qual[max_size],qual2[max_size];
+    char qbase[100]="CTACACGACGCTCTTCCGATCT";
+    level_t qlvl[100];
+    char qbase2[100];
+    strcpy(qbase2, qbase);
+    level_t qlvl2[100];
+    revcom(qbase2);
+    int qlvl_len=strlen(qbase)-MER_LENGTH+1;
+    seq2level(model, qbase, qlvl, 100, 0);
+    seq2level(model, qbase2, qlvl2, 100, 0);
+//    fp=gzopen(argv[2], "r");
+//    seq=kseq_init(fp);
+    result_t *resq=(result_t *) calloc(2, sizeof(result_t));
+    result_t *wl_resq=(result_t *) calloc(2, sizeof(result_t));
+    result_t the_res;   // not initialized but ....
+    int ret;
+    int r=3; // specify bandwidth here
+    level_t bc[128];
+    level_t u_d[128], l_d[128];
+    char tmpstr[128];  //for printing purpose
+    seq2level(model, Seq.c_str(), lvl, max_size, r);
+    seq2merqual(Quality.c_str(), qual, max_size, r);
+    seq2merqual2(Quality.c_str(), qual2, max_size, r);
+    reset_resultq(resq);
+    ret = ucrdtw(lvl, Seq.length() - MER_LENGTH+1+r, qlvl, qlvl_len, r, 0, resq, 200, 1);
+    ret = ucrdtw(lvl, Seq.length() - MER_LENGTH+1+r, qlvl2, qlvl_len, r, 0, resq, add_result_cap2(resq, -1,INF,1,0,5), -1);
+    the_res=pick_result_cap2(resq, Seq.length()-MER_LENGTH+1);
+    reset_resultq(wl_resq);
+    
+    if(the_res.location!=-1){
+//      cout << "debug2.1" << endl;
+      
+      if(the_res.flag==1){//forward
+//        cout << "debug2.1.1" << endl;
+        //dtw3_bt(lvl+the_res.location, qlvl, qual+the_res.location, qual2+the_res.location, qlvl_len, r);
+        level_t best=500;
+        long best_loc=-1;
+        long j=0;
+        long bc_len=33+3;
+        for(long i=the_res.location; i< the_res.location + bc_len ; i++){
+          bc[j++]=lvl[i];
+        }
+        //printLevels(bc, bc_len);
+        strncpy(tmpstr, Seq.c_str()+the_res.location, bc_len+MER_LENGTH-1);
+        tmpstr[bc_len+MER_LENGTH-1]=0;
+//        printf("debugSeq %s\n", tmpstr);
+        lower_upper_lemire(bc, bc_len, r, l_d, u_d);
+        //cout << "debug2.1.1.1" << endl;
+        //cout << "wl_db size: " << wl_db->size << endl;
+//        cout << "debug2.1.1.1" << endl;
+        for(long i=0; i<wl_db->size; i++){
+          //printLevels(wll[i],33);
+//          cout << i << endl;
+          reset_resultq(resq);
+          //cout << "debug2.1.1.1.1" << endl;
+          ret=ucrdtw_checkWL(bc, bc_len, u_d, l_d, wl_db, i, 0, 0, resq, best, 1);
+          //cout << "debug2.1.1.1.2" << endl;
+          //debug
+          //printf("tmpdebug %s\n", wl_db->seq[i]+22);
+          //dtw3_bt(lvl+the_res.location, wl_db->lvl[i], qual+the_res.location, qual2+the_res.location, 33,r );
+          //debug
+          //printResult(resq);
+          if(resq[0].distance<best){
+            best=add_result_cap2(wl_resq, i, resq[0].distance, 1, 0,0);
+          }
+        }
+//        cout << "debug2.1.2" << endl;
+        if(wl_resq[0].location>=0){
+//          cout << getSeq(wl_db,wl_resq[0].location,22) << endl;
+//          cout << the_res.location << endl;
+//          cout << wl_resq[0].location << endl;
+          
+          //dtw3_bt(lvl+the_res.location, wl_db->lvl[wl_resq[0].location], qual+the_res.location, qual2+the_res.location, 33,r ); //buggy
+          //dtw3_bt(lvl+the_res.location, wl_db->lvl[wl_resq[1].location], qual+the_res.location, qual2+the_res.location, 33,r );
+          this->stat="fine_DTW";
+          this->barcode=getSeq(wl_db,wl_resq[0].location,22);
+          this->barcodeStrand="orignal";
+          this->barcodeMismatch=(int)(wl_resq[0].distance-the_res.distance);
+//          printf("final %s %.4f forward %s %.4f %s %.4f\n", ID.c_str(), the_res.distance,getSeq(wl_db,wl_resq[0].location,22),wl_resq[0].distance,getSeq(wl_db,wl_resq[1].location,22),wl_resq[1].distance);
+        }else{
+//          printf("debugX,notFound\nfinal,notFound\n");
+        }
+//      cout << "debug2.1.3" << endl;
+      }else{         //reverse
+        //dtw3_bt(lvl+the_res.location, qlvl2, qual+the_res.location,qual2+the_res.location,qlvl_len, r);
+        level_t best=500;
+        long best_loc=-1;
+        long j=0;
+        long bc_len=33+8;
+        for(long i=the_res.location-19; i< the_res.location-19 + bc_len; i++){
+          bc[j++]=lvl[i];
+        }
+        
+        //printLevels(bc, bc_len);
+//        cout << "debug2.1.3.1" << endl;
+        strncpy(tmpstr, Seq.c_str()+the_res.location-19, bc_len+MER_LENGTH-1);
+//        cout << "debug2.1.3.2" << endl;
+        tmpstr[bc_len+MER_LENGTH-1]=0;
+//        printf("debugSeq %s\n", tmpstr);
+        lower_upper_lemire(bc, bc_len, r, l_d, u_d);
+//        cout << "debug2.1.4" << endl;
+        for(long i=0; i<wl_db->size; i++){
+          //printLevels(wllr[i],33);
+          reset_resultq(resq);
+          ret=ucrdtw_checkWL(bc, bc_len, u_d, l_d, wl_db, i, 1, 0, resq, best, -1);			
+          //printResult(resq);
+          if(resq[0].distance<best){
+            //best=add_result_cap2(wl_resq, i, resq[0].distance, -1, 0,0);
+            best=add_result_cap2(wl_resq, i, resq[0].distance, resq[0].location, 0,0);
+            //offset=resq[0].location;
+          }
+        }
+        //cout << "debug2.1.5" << endl;
+        if(wl_resq[0].location>=0){
+//          cout << getSeq(wl_db,wl_resq[0].location,22) << endl;
+//          printf("debugY,");
+//          printResult(wl_resq);
+          //printf(",%s,",wl[wl_resq[0].location]);
+          //printf(",%s,",wl_db->seq[wl_resq[0].location]);
+//          printf(",%s,",getSeq(wl_db, wl_resq[0].location,0));
+//          printResult(&wl_resq[1]);
+//          printf("\n");
+          //dtw3_bt(lvl+the_res.location-19+wl_resq[0].flag, wl_db->lvl_r[wl_resq[0].location], qual+the_res.location-19+wl_resq[0].flag, qual2+the_res.location-19+wl_resq[0].flag, 33,r );
+          this->stat="fine_DTW";
+          this->barcode=getSeq(wl_db,wl_resq[0].location,22);
+          this->barcodeStrand="reverse_complement";
+          this->barcodeMismatch=(int)(wl_resq[0].distance-the_res.distance);
+          //dtw3_bt(lvl+the_res.location-19+wl_resq[1].flag, wl_db->lvl_r[wl_resq[1].location], qual+the_res.location-19+wl_resq[1].flag, qual2+the_res.location-19+wl_resq[1].flag, 33,r );
+          //printf("final\t%s\t%.4f\treverse\t%s\t%.4f\t%s\t%.4f\n", ID.c_str(), the_res.distance,getSeq(wl_db,wl_resq[0].location,22),wl_resq[0].distance,getSeq(wl_db,wl_resq[1].location,22),wl_resq[1].distance);
+          //printf("final\t%s\t%.4f\treverse\t%s\t%.4f\t%s\t%.4f\n", seq->name.s, the_res.distance,wl_db->seq[wl_resq[0].location]+22,wl_resq[0].distance,wl_db->seq[wl_resq[1].location]+22,wl_resq[1].distance);
+        }else{
+//          printf("debugY,notFound\nfinal,notFound\n");
+        } 
+        
+      }
+    
+    }
+  }
+  
 };
 
 struct AmbiguousBarcode{
@@ -1380,7 +1567,7 @@ public:
   
   //active constructor
   //constructor generate output while reading reads
-  ReadFile(const char* filename, BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds, int maxMismatch, int tech, int threadnum){
+  ReadFile(const char* filename, BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds, int maxMismatch, int tech, int threadnum, const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false){
     string output_filename="filtered.fastq.gz";
     string trimmed_output_filename="trimmed_filtered.fastq.gz";
     gzFile outFile=gzopen(output_filename.c_str(), "wb2");
@@ -1417,7 +1604,9 @@ public:
               int threadmaxDistToEnds=maxDistToEnds;
               int threadmaxMismatch=maxMismatch;
               int threadtech=tech;
-              identifyBarcodesinBlock(Readmatrix[i],threadbarcode,threadsegments,threadmaxDistToEnds,threadmaxMismatch,threadtech);
+//              cout << "start bc i" << endl;
+              identifyBarcodesinBlock(Readmatrix[i],threadbarcode,threadsegments,threadmaxDistToEnds,threadmaxMismatch,threadtech, model, wl_db, dtw);
+//              cout << "end bc i" << endl;
             } //for(int i=0;i<threadnum;++i)
             
             writeReadData(Readmatrix,streambarcodeinfo,streamFQ,streamFQ_trim);
@@ -1445,7 +1634,7 @@ public:
           int threadmaxDistToEnds=maxDistToEnds;
           int threadmaxMismatch=maxMismatch;
           int threadtech=tech;
-          identifyBarcodesinBlock(Readmatrix[i],threadbarcode,threadsegments,threadmaxDistToEnds,threadmaxMismatch,threadtech);
+          identifyBarcodesinBlock(Readmatrix[i],threadbarcode,threadsegments,threadmaxDistToEnds,threadmaxMismatch,threadtech, model, wl_db, dtw);
         } //for(int i=0;i<Readmatrix.size();++i)
 
         writeReadData(Readmatrix,streambarcodeinfo,streamFQ,streamFQ_trim);
@@ -1462,32 +1651,6 @@ public:
     } //while(true)
   };
 
-/*  
-  //active constructor for multithreads
-  //constructor generate output while reading reads
-  ReadFile(const char* filename, BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds, int maxMismatch, int tech, int threads){
-    ReadCount=0;
-    string output_filename="filtered.fastq.gz";
-    gzFile outFile=gzopen(output_filename.c_str(), "wb2");
-    int barcode_length=barcodes.barcodes[0].length();
-    File=gzopen(filename, "r");
-    seq=kseq_init(File);
-    while (kseq_read(seq) >= 0){
-      ReadCount++;
-      Read* tmpRead=NULL;
-      tmpRead=new Read;
-      tmpRead->ID=seq->name.s;
-      tmpRead->Seq=seq->seq.s;
-      tmpRead->Quality=seq->qual.s;
-      thread t1(&Read::identifyBarcodes,tmpRead,barcodes,segments,maxDistToEnds,maxMismatch,tech,outFile);
-      t1.join();
-      delete tmpRead;
-    } //while (kseq_read(seq) >= 0)
-    kseq_destroy(seq);
-    gzclose(outFile);
-    gzclose(File);
-  };
-   */
   
   void printReadIDs(){
     for(int i=0;i<Reads.size();++i){
@@ -1507,9 +1670,9 @@ public:
     }
   }
   
-  void identifyBarcodesinBlock(vector<Read>& blockreads,BarcodeFile& barcode,vector<int> segments,int maxDistToEnds,int maxMismatch,int tech){
+  void identifyBarcodesinBlock(vector<Read>& blockreads,BarcodeFile& barcode,vector<int> segments,int maxDistToEnds,int maxMismatch,int tech, const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false){
     for(int i=0;i<blockreads.size();++i){
-      blockreads[i].identifyBarcodes(barcode,segments,maxDistToEnds,maxMismatch,tech);
+      blockreads[i].identifyBarcodes(barcode,segments,maxDistToEnds,maxMismatch,tech, model, wl_db, dtw);
     }
   }
   
