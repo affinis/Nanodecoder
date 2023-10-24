@@ -13,6 +13,7 @@ using std::max;
 using std::min;
 using std::cout;
 using std::endl;
+using std::unordered_map;
 
 #define GAP_PENALTY 0
 #define MATCH_SCORE 1
@@ -26,11 +27,29 @@ int editDistance(string& seq1, string& seq2);
 char base_to_number[26] {1,-1,2,-1,-1,-1,3,-1,-1,-1,-1,-1,-1,0,-1,-1,-1,-1,-1,4,-1,-1,-1,-1,-1,-1};
 char number_to_base[26] {'A','C','G','T'};
 
+unordered_map<int, string> num_to_strand{
+  {0,"original"},{1,"reverse"},{2,"complement"},{3,"reverse_complement"},{-1,"*"}
+};
+
+unordered_map<string, int> strand2num{
+  {"+",0},{"-",3}
+};
+
+unordered_map<int, string> num2rna{
+  {0,"forward"},{3,"reverse"}
+};
+
 struct alignment {
   vector<char> aligned_seq1 {};
   vector<char> aligned_symbol {};
   vector<char> aligned_seq2 {};
   };
+
+struct simple_hit{
+  int hstart;
+  int strand;
+  int mismatch;
+};
 
 struct kmerDistancesThreadData{
   int threadID;
@@ -158,7 +177,17 @@ int hamming_distance(string& A, string& B)
   return dist;
 }
 
-
+vector<string> tokenize(string const &str, const char delim){
+  size_t start;
+  size_t end = 0;
+  vector<string> splits;
+  while ((start = str.find_first_not_of(delim, end)) != string::npos)
+  {
+    end = str.find(delim, start);
+    splits.push_back(str.substr(start, end - start));
+  }
+  return splits;
+}
 
 int editDistance(string& seq1, string& seq2, int indel_num){
   

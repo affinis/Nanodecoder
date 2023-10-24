@@ -33,10 +33,6 @@ using std::thread;
 
 KSEQ_INIT(gzFile, gzread)
 
-unordered_map<int, string> num_to_strand{
-  {0,"original"},{1,"reverse"},{2,"complement"},{3,"reverse_complement"},{-1,"*"}
-  };
-
 string TENX_TSO="TTTCTTATATGGG";
 string TENX_R1="CTACACGACGCTCTTCCGATCT";
 string POLYT="TTTTTTTTTTTTT";
@@ -136,6 +132,9 @@ public:
   string UMI="*";
   string Seq_trimmed;
   string Quality_trimmed;
+  vector<int> R1Aps;
+  vector<int> R1Ass;
+  vector<int> R1Ams;
   int OUTER;
   int INNER;
   vector<string> Kmers;
@@ -284,6 +283,87 @@ public:
       }
     }
     return best_align.first;
+  }
+  
+  /*!
+   @abstract Find Read1 adapter on sequence.
+   
+   @param mismatch_max: max mismatch allowed for Read1 adapter.
+   @param search_start: start position of search range, 1-based.
+   @param search_end: end position of search range, 1-based.
+   @param seq: target sequence for searching read1 adapter.
+   
+   @return null, add read1 adapter data to R1Aps, R1Ams, R1Ass.
+   */
+  void findR1a(int mismatch_max, int search_start, int search_end){
+    int minDist=22;
+    int minDistIndex;
+    int minDistStrand;
+    if(search_end>this->Seq.length()){
+      fprintf(stderr,"findR1a: search_end larger than read length\n");
+      exit(0);
+    }
+    string testseq=this->Seq.substr(search_start-1,search_end-search_start+1);
+    vector<pair<int, int>> res;
+    vector<string> kmers=genrateKmerFromSeq(testseq,TENX_R1.length());
+    string TENX_R1_REV=reverse_complement(TENX_R1);
+    int i=0;
+    for(string kmer:kmers){
+      int strand;
+      int dist=editDistance(TENX_R1, kmer, mismatch_max);
+      strand=0;
+      if(editDistance(TENX_R1_REV, kmer, mismatch_max)<dist){
+        dist=editDistance(TENX_R1_REV, kmer, mismatch_max);
+        strand=3;
+      }
+      if(dist>minDist || dist>mismatch_max){
+        i++;
+        continue;
+      }else{
+        minDist=dist;
+        minDistIndex=i+search_start;
+        minDistStrand=strand;
+//        cout << minDist << "\t" << minDistIndex << "\t" << minDistStrand << endl;
+        if(this->R1Aps.size()==0||minDistIndex-R1Aps[R1Aps.size()-1]>=22){
+          this->R1Aps.push_back(minDistIndex);
+          this->R1Ass.push_back(minDistStrand);
+          this->R1Ams.push_back(minDist);
+          i++;
+          continue;
+        }else if(minDistIndex-R1Aps[R1Aps.size()-1]<22){
+          this->R1Aps.pop_back();
+          this->R1Ass.pop_back();
+          this->R1Ams.pop_back();
+          this->R1Aps.push_back(minDistIndex);
+          this->R1Ass.push_back(minDistStrand);
+          this->R1Ams.push_back(minDist);
+          i++;
+          continue;
+        }
+      }
+    }
+  }
+  
+  string generate_R1a_summary(){
+    string res="";
+    if(this->R1Aps.size()==0){
+      return("*");
+    }
+    for(int index:this->R1Aps){
+      res=res+to_string(index)+',';
+    }
+    res.erase(res.begin()+res.length()-1);
+    res=res+':';
+    for(int strand:this->R1Ass){
+      res=res+num2rna[strand]+',';
+    }
+    res.erase(res.begin()+res.length()-1);
+    res=res+':';
+    for(int mismatch:this->R1Ams){
+      res=res+to_string(mismatch)+',';
+    }
+    res.erase(res.begin()+res.length()-1);
+    return(res);
   }
   
   pair<int, int> isConstantSequenceContaining(string& constantseq, int testRange, int max_testseq_mismatch, int strand, bool loose=false){
@@ -1068,17 +1148,7 @@ struct AmbiguousBarcode{
   int mismatch;
   };
 
-vector<string> tokenize(string const &str, const char delim){
-  size_t start;
-  size_t end = 0;
-  vector<string> splits;
-  while ((start = str.find_first_not_of(delim, end)) != string::npos)
-  {
-    end = str.find(delim, start);
-    splits.push_back(str.substr(start, end - start));
-  }
-  return splits;
-}
+
 
 class ReadFile{
 private:
@@ -1174,6 +1244,26 @@ public:
       tmpRead.Quality=seq->qual.s;
       Reads.push_back(tmpRead);
       }
+    kseq_destroy(seq);
+    gzclose(File);
+  };
+  
+  //constructor identify all R1a on reads
+  ReadFile(const char* filename, bool best=true){
+    ReadCount=0;
+    File=gzopen(filename, "r");
+    seq = kseq_init(File);
+    while (kseq_read(seq) >= 0){
+      ReadCount++;
+      Read tmpRead;
+      tmpRead.ID=seq->name.s;
+      tmpRead.Seq=seq->seq.s;
+      tmpRead.Quality=seq->qual.s;
+//      cout << "identifying R1a" << endl;
+      tmpRead.findR1a(4,1,874);
+      string R1asum=tmpRead.generate_R1a_summary();
+      cout << tmpRead.ID << "\t" << R1asum << endl;
+    }
     kseq_destroy(seq);
     gzclose(File);
   };
