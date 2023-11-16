@@ -14,3 +14,13 @@ cd htslib-1.9
 sudo make
 sudo ln -s libhts.so.2 ../
 ```
+
+```Bash
+version `GLIBC_X.XX' not found
+```
+
+```Bash
+sudo echo "deb http://th.archive.ubuntu.com/ubuntu jammy main" >> /etc/apt/sources.list
+sudo apt update
+sudo apt install libc6
+```

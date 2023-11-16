@@ -15,16 +15,18 @@ int main(int argc, char *argv[]){
       break;
     } // end switch
   }// end while
+  
+  ofstream File;
+  File.open("read_annotation.tsv", ios::out);
+  
   unordered_map<string, gene_feature> gene_features;
   unordered_map<string, mapping_info> ReadMapping;
   unordered_map<string, map<int,pair<int,string>>> sorted_gene_features;
   
   readFeaturesFromGTF(GTFfilename,gene_features);
   sortFeaturesByCoord(gene_features,sorted_gene_features);
-  readMappingFile(Bamfilename,ReadMapping);
+  readMappingFile(Bamfilename,ReadMapping,sorted_gene_features,gene_features,false,File);
   
-  for(auto map:ReadMapping){
-    map.second.annotateRead(sorted_gene_features,gene_features,false);
-  }
+  File.close();
 }
 

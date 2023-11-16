@@ -9,11 +9,13 @@
 
 using std::string;
 using std::vector;
-using std::max;
-using std::min;
+//using std::max;
+//using std::min;
 using std::cout;
 using std::endl;
 using std::unordered_map;
+using std::to_string;
+using std::pair;
 
 #define GAP_PENALTY 0
 #define MATCH_SCORE 1
@@ -32,11 +34,15 @@ unordered_map<int, string> num_to_strand{
 };
 
 unordered_map<string, int> strand2num{
-  {"+",0},{"-",3}
+  {"+",0},{"-",3},{"forward",0},{"reverse",3},{"*",-1}
 };
 
 unordered_map<int, string> num2rna{
-  {0,"forward"},{3,"reverse"}
+  {0,"forward"},{3,"reverse"},{-1,"*"}
+};
+
+unordered_map<int, int> reverse_strand{
+  {0,3},{3,0},{-1,-1}
 };
 
 struct alignment {
@@ -119,7 +125,7 @@ int nuc_global_alignment(int* seq_1, int* seq_2,const int i,const int j){
 //      cout << scoreMat[n*(j+1)+m-i-1] << endl;
       int siteScore=w(seq_1[n-1],seq_2[m-1]);
       upperleft+=siteScore;
-      scoreMat[n*(j+1)+m]=max(max(upper,left),upperleft);
+      scoreMat[n*(j+1)+m]=std::max(std::max(upper,left),upperleft);
 //      cout << scoreMat[n*(j+1)+m] << "\t";
       }
 //    cout << endl;
@@ -213,7 +219,7 @@ int editDistance(string& seq1, string& seq2, int indel_num){
         dp[i][j] = dp[i-1][j-1];
         }
       else{
-        dp[i][j] = 1 + min(dp[i][j-1], min(dp[i-1][j], dp[i-1][j-1]));
+        dp[i][j] = 1 + std::min(dp[i][j-1], std::min(dp[i-1][j], dp[i-1][j-1]));
         }
       if((i>=n-indel_num&&j==m)||(j>=m-indel_num&&i==n)){
         candidates.push_back(dp[i][j]);
@@ -242,7 +248,7 @@ int minDistance(string w1, string w2) {
   for(int i =1;i<=n;i++){
     for(int j = 1;j<=m;j++){
       if(w1[i] !=w2[j]){
-        dp[i][j] = 1+min({dp[i-1][j],dp[i][j-1],dp[i-1][j-1]});
+        dp[i][j] = 1+std::min({dp[i-1][j],dp[i][j-1],dp[i-1][j-1]});
       } else {
         dp[i][j] = dp[i-1][j-1];
       }
@@ -270,7 +276,7 @@ void editDistances(int id, string seq1, string seq2, vector<int> results){
         dp[i][j] = dp[i-1][j-1];
       }
       else{
-        dp[i][j] = 1 + min(dp[i][j-1], min(dp[i-1][j], dp[i-1][j-1]));
+        dp[i][j] = 1 + std::min(dp[i][j-1], std::min(dp[i-1][j], dp[i-1][j-1]));
       }
     }
   }
@@ -296,6 +302,7 @@ vector<int> kmerDistances(string& queryseq, vector<string>& kmers){
 }
  */
 
+/*
 kmerCandidate minKmerDistance(string& queryseq, vector<string>& kmers,
                           bool r=false, bool c=false, bool rc=false){
   string revquery=NULL;
@@ -313,6 +320,7 @@ kmerCandidate minKmerDistance(string& queryseq, vector<string>& kmers,
     rcquery=reverse_complement(queryseq);
     }
   }
+ */
 
 vector<int> getMaxComplexitySegments(int total_length, int num_segments){
   int base_length=floor(total_length/num_segments);
@@ -368,44 +376,141 @@ vector<int> seq2CurrentLevels(string& seq, std::unordered_map<string, int>& curr
   return(current_levels);
 }
 
-/*
-vector<int> kmerDistancesMultithreads(string& queryseq, vector<string>& kmers){
-  int numKmers=kmers.size();
-  vector<int> distances[numKmers];
-  for(int i=0;i<numKmers;++i){
-    string kmer=kmers[i];
-    thread threadApp {editDistance,queryseq,kmer};
-    }
+string stringCat(vector<string>& vec){
+  string res="";
+  for(string str:vec){
+    res=res+str+",";
   }
-*/
+  res.erase(res.end()-1);
+  return(res);
+}
 
-/*
-int main(){
-  alignment align_main;
-  int seq1num[seq1.length()];
-  int seq1num_r[seq1.length()];
-  int seq1num_rc[seq1.length()];
-  int seq2num[seq2.length()];
-  for(int i=0;i<seq1.length();i++){
-    seq1num[i]=base_to_number[seq1[i]-'A'];
-//    cout << seq1num[i];
-    }
-//  cout << endl;
-  for(int j=0;j<seq2.length();j++){
-    seq2num[j]=base_to_number[seq2[j]-'A'];
-//    cout << seq2num[j];
+string stringCat(vector<float>& vec){
+  string res="";
+  for(float flo:vec){
+    res=res+to_string(flo)+",";
   }
-//  cout << endl;
-  ///get reverse and reverse complement sequence of seq1
-  for(int i=0;i<seq1.length();i++){
-    seq1num_r[i]=base_to_number[seq1[seq1.length()-1-i]-'A'];
-    seq1num_rc[i]=3-base_to_number[seq1[seq1.length()-1-i]-'A'];
-    }
-  int score=nuc_global_alignment(seq1num,seq2num,seq1.length(),seq2.length());
-  int score_r=nuc_global_alignment(seq1num_r,seq2num,seq1.length(),seq2.length());
-  int score_rc=nuc_global_alignment(seq1num_rc,seq2num,seq1.length(),seq2.length());
-  cout << "query score to subject: " << score << endl;
-  cout << "reverse query score to subject: " << score_r << endl;
-  cout << "reverse complement query score to subject: " << score_rc << endl;
+  res.erase(res.end()-1);
+  return(res);
+}
+  
+string stringCat(vector<int>& vec){
+  string res="";
+  for(int integer:vec){
+    res=res + to_string(integer) +",";
   }
-*/
+  res.erase(res.end()-1);
+  return(res);
+} 
+
+vector<pair<int,int>> string2regions(string& str){
+  vector<pair<int,int>> res;
+  vector<string> regions=tokenize(str,';');
+  for(string region:regions){
+    if(region==""){
+      continue;
+    }else{
+      pair<int,int> region_int;
+      region_int.first=stoi(tokenize(region,'-')[0]);
+      region_int.second=stoi(tokenize(region,'-')[1]);
+      res.push_back(region_int);
+    }
+  }
+  return(res);
+}
+
+vector<vector<int>> string2hit_overlaps(string& str){
+  vector<vector<int>> res;
+  if(str=="*"||str.empty()){
+    return(res);
+  }
+  vector<int> hit_group;
+  for(int i=0;i<str.length();i++){
+    if(str[i]==','){
+      continue;
+    }
+    if(str[i]==';'){
+      res.push_back(hit_group);
+      hit_group.clear();
+    }
+    hit_group.push_back(str[i]);
+  }
+  return(res);
+}
+
+string regions2string(vector<pair<int,int>>& regions){
+  if(regions.empty()){
+    return("*");
+  }
+  string res="";
+  for(pair<int,int> region:regions){
+    res=res+to_string(region.first)+"-"+to_string(region.second)+";";
+  }
+  return(res);
+}
+
+vector<int> string2strands(string& str){
+  vector<int> res;
+  if(str.empty()){
+    return(res);
+  }
+  vector<string> fields=tokenize(str,',');
+  for(string strand_str:fields){
+    if(strand_str==""){
+      continue;
+    }
+    res.push_back(strand2num[strand_str]);
+  }
+  return(res);
+}
+
+string strands2string(vector<int>& strands){
+  string res="";
+  if(strands.empty()){
+    return("*");
+  }
+  for(int strand:strands){
+    res=res+num2rna[strand]+",";
+  }
+  res.erase(res.end()-1);
+  return(res);
+}
+
+bool isContaining(int query, pair<int,int>& target){
+  if(query>=target.first&&query<=target.second){
+    return(true);
+  }else{
+    return(false);
+  }
+}
+
+bool isContaining(pair<int,int>& query, pair<int,int>& target){
+  if(query.first>=target.first&&query.second<=target.second){
+    return(true);
+  }else{
+    return(false);
+  }
+}
+
+float calculate_cov(pair<int,int>& query, pair<int,int>& subject){
+  float cov;
+  if(isContaining(query,subject)){
+    cov=1;
+  }else if(isContaining(query.first,subject)&&!isContaining(query.second,subject)){
+    cov=static_cast<float>(subject.second-query.first+1)/(query.second-query.first+1);
+  }else if(!isContaining(query.first,subject)&&isContaining(query.second,subject)){
+    cov=static_cast<float>(query.second-subject.first+1)/(query.second-query.first+1);
+  }else if(isContaining(subject,query)){
+    cov=static_cast<float>(subject.second-subject.first+1)/(query.second-query.first+1);
+  }else{
+    cov=0;
+  }
+  return(cov);
+}
+
+int pair_length(pair<int,int>& pair_in){
+  if(pair_in.first>pair_in.second){
+    return(pair_in.first-pair_in.second+1);
+  }
+  return(pair_in.second-pair_in.first+1);
+}

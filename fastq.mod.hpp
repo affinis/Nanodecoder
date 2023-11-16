@@ -13,8 +13,8 @@
 #include <thread>
 #include <omp.h>
 
-#include "kseq.h"
 #include "prosessSeq.hpp"
+#include "kseq.h"
 #include "UCR_DTW2.h"
 #include "pore_model.h"
 #include "decoder.h"
@@ -29,13 +29,23 @@ using std::smatch;
 using std::regex_search;
 using std::thread;
 
-//firstly sample from reads, and find TSO and r1 to determine barcode range
-
 KSEQ_INIT(gzFile, gzread)
 
 string TENX_TSO="TTTCTTATATGGG";
 string TENX_R1="CTACACGACGCTCTTCCGATCT";
 string POLYT="TTTTTTTTTTTTT";
+
+struct ReadAnno{
+  string read_id;
+  vector<string> gene_id;
+  vector<string> gene_name;
+  vector<int> read_orientation;
+  vector<pair<int,int>> free_regions;
+  vector<pair<int,int>> qhits;
+  vector<vector<int>> hit_overlaps;
+  vector<pair<int,int>> occupied_regions;
+  int flag;
+};
 
 class BarcodeFile{
 public:
@@ -112,36 +122,34 @@ public:
     barcodeFile.close();
   }
   
-  /*  
-   void printWordToBarcode(string word){
-   cout << "Printing barcodes containing " << word << " on oringial strand.." << endl;
-   for(int i=0;i<barcode_dict[word].size();i++){
-   cout << barcode_dict[word][i] << " ";
-   }
-   cout << endl;
-   }
-   */
 };
 
 
 class Read{
 public:
-  string ID;
+  string ID="default";
   string Seq;
   string Quality;
   string UMI="*";
   string Seq_trimmed;
   string Quality_trimmed;
+  vector<pair<int,int>> freeRegions;
+  vector<pair<int,int>> qhits;
+  vector<int> qhitOrient;
+  vector<vector<int>> hit_overlaps;
+  vector<pair<int,int>> occupiedRegions;
+  vector<string> hit_names;
+  vector<string> hit_ids;
   vector<int> R1Aps;
   vector<int> R1Ass;
   vector<int> R1Ams;
-  int OUTER;
-  int INNER;
+  int OUTER=-1;
+  int INNER=-1;
   vector<string> Kmers;
   int barcodeStart=-1;
-  string barcode;
+  string barcode="*";
   string barcodeStrand;
-  int fusionpoint;
+  int fusionPoint;
   int barcodeMismatch;
   string stat;
   int polyAT_containing=0;
@@ -150,6 +158,7 @@ public:
   vector<string> barcode_intolerance_detail;
   vector<string> matched_kmer_quality;
   vector<int> barcode_mismatches;
+  string final_annotation="*";
   
   Read(){
     ID="defalut";
@@ -167,6 +176,9 @@ public:
     string barcode_intolerance_detail_str="";
     string barcode_intolerance_indices_str="";
     string barcode_mismatches_str="";
+    string R1a_position_str="";
+    string R1a_strand_str="";
+    vector<string> R1a_strands;
     if(barcode_intolerance_detail.size()==0){
       barcode_intolerance_detail_str="*";
       barcode_intolerance_indices_str="*";
@@ -178,16 +190,40 @@ public:
         barcode_mismatches_str=barcode_mismatches_str+std::to_string(barcode_mismatches[i])+",";
       }
     }
-    cout << ID << "\t" << stat << "\t" << OUTER << "\t";
-    cout << barcode << "\t" << barcodeStart << "\t" << INNER;
-    cout << "\t" << barcodeStrand << "\t" << barcodeMismatch << "\t" << polyAT_containing << "\t" << barcode_in_tolerance;
-    cout << "\t" << barcode_intolerance_detail_str << "\t" << barcode_intolerance_indices_str << "\t" << barcode_mismatches_str << endl;
+    if(R1Ass.empty()){
+      if(OUTER==-1){
+        R1a_position_str="-1";
+        R1a_strand_str="*";
+      }else{
+        R1a_position_str=to_string(OUTER);
+        R1a_strand_str="*";
+      }
+    }else{
+      for(int j:this->R1Ass){
+        R1a_strands.push_back(num2rna[j]);
+      }
+      R1a_position_str=stringCat(this->R1Aps);
+      R1a_strand_str=stringCat(R1a_strands);
+    }
+    string hit_regions_str=regions2string(this->qhits);
+    string hit_strands_str=strands2string(this->qhitOrient);
+    cout << ID << "\t" << stat << "\t" << R1a_position_str << "\t" << R1a_strand_str << "\t";
+    cout << barcode << "\t" << barcodeStart << "\t" << barcodeStrand << "\t" << barcodeMismatch << "\t";
+    cout << barcode_in_tolerance << "\t" << barcode_intolerance_detail_str << "\t" << barcode_intolerance_indices_str << "\t" << barcode_mismatches_str << "\t";
+    cout << hit_regions_str << "\t" << hit_strands_str << "\t" << this->final_annotation << endl;
   }
   
   void printBarcodeInfo(std::stringstream &stream){
+    if(this->stat=="Read_unmapped"){
+      stream << ID << "\t" << stat << endl;
+      return;
+    }
     string barcode_intolerance_detail_str="";
     string barcode_intolerance_indices_str="";
     string barcode_mismatches_str="";
+    string R1a_position_str="";
+    string R1a_strand_str="";
+    vector<string> R1a_strands;
     if(barcode_intolerance_detail.size()==0){
       barcode_intolerance_detail_str="*";
       barcode_intolerance_indices_str="*";
@@ -199,12 +235,258 @@ public:
         barcode_mismatches_str=barcode_mismatches_str+std::to_string(barcode_mismatches[i])+",";
       }
     }
-    //1. read_id 2. status 3. OCS_start 4. barcode 5. barcode_start 6. ICS_start 7. barcode_strand 8. barcode_mismatch 9. polyAT_containing
-    //10 num_barcode 11. barcodes 12. barcode_starts 13. barcode_mismatches
-    stream << ID << "\t" << stat << "\t" << OUTER << "\t";
-    stream << barcode << "\t" << barcodeStart << "\t" << INNER;
-    stream << "\t" << barcodeStrand << "\t" << barcodeMismatch << "\t" << polyAT_containing << "\t" << barcode_in_tolerance;
-    stream << "\t" << barcode_intolerance_detail_str << "\t" << barcode_intolerance_indices_str << "\t" << barcode_mismatches_str << endl;
+    if(R1Ass.empty()){
+      if(OUTER==-1){
+        R1a_position_str="-1";
+        R1a_strand_str="*";
+      }else{
+        R1a_position_str=to_string(OUTER);
+        R1a_strand_str="*";
+      }
+    }else{
+      for(int j:this->R1Ass){
+        R1a_strands.push_back(num2rna[j]);
+      }
+      R1a_position_str=stringCat(this->R1Aps);
+      R1a_strand_str=stringCat(R1a_strands);
+    }
+    string hit_regions_str=regions2string(this->qhits);
+    string hit_strands_str=strands2string(this->qhitOrient);
+    //     1. read_id    2. status          3. R1a_start              4. R1a_strand
+    stream << ID << "\t" << stat << "\t" << R1a_position_str << "\t" << R1a_strand_str << "\t";
+    //     5. barcode          6. barcode_start         7. barcode_strand        8. barcode_mismatch
+    stream << barcode << "\t" << barcodeStart << "\t" << barcodeStrand << "\t" << barcodeMismatch << "\t";
+    //         9. num_of barcodes               10. barcodes                             11. barcode_starts                     12. barcode_mismatches
+    stream << barcode_in_tolerance << "\t" << barcode_intolerance_detail_str << "\t" << barcode_intolerance_indices_str << "\t" << barcode_mismatches_str << "\t";
+    //          13. hit regions           14. hit orientations         15. final annotation
+    stream << hit_regions_str << "\t" << hit_strands_str << "\t" << this->final_annotation << endl;
+  }
+  
+  string choose_annotation(string id, string name){
+    if(name=="*"){
+      if(id=="*"){
+        return("non-transcriptome");
+      }else{
+        return(id);
+      }
+    }else{
+      return(name);
+    }
+  }
+  
+  int find_nearest_region(vector<pair<int,int>> regions, int position, int strand){
+    if(regions.empty()){
+      fprintf(stderr,"find_nearest_region: regions empty.");
+      exit(0);
+    }
+    int min_dist=this->Seq.length();
+    int min_dist_index=regions.size();
+    for(int i=0;i<regions.size();i++){
+      int this_dist;
+      if(strand==0){
+        this_dist=regions[i].first-position;
+      }else if(strand==3){
+        this_dist=position-regions[i].second;
+      }else{
+        fprintf(stderr,"find_nearest_region: invalid strand.");
+        exit(0);
+      }
+      if(this_dist<min_dist){
+        min_dist=this_dist;
+        min_dist_index=i;
+        continue;
+      }
+    }
+    return(min_dist_index);
+  }
+  
+  vector<int> filter_hit_by_strand(vector<int>& strands, int target_strand){
+    vector<int> valid_hit_idx;
+    bool all_non_transcript=true;
+    for(int i=0;i<strands.size();i++){
+      if(strands[i]==target_strand){
+        valid_hit_idx.push_back(i);
+        all_non_transcript=false;
+        continue;
+      }
+    }
+    if(all_non_transcript){
+      valid_hit_idx.push_back(-1);
+    }
+    return(valid_hit_idx);
+  }
+  
+  vector<int> filter_hit_by_strand_and_region(vector<pair<int,int>>& occupied_regions,
+              vector<pair<int,int>>& hits, vector<int> hit_strands, int target_position, int target_strand){
+    vector<int> res;
+    pair<int,int> region_for_R1a=occupied_regions[find_nearest_region(occupied_regions,target_position,target_strand)];
+    bool all_non_transcript=true;
+    for(int idx=0;idx<hits.size();idx++){
+      if(isContaining(hits[idx],region_for_R1a)&&hit_strands[idx]==target_strand){
+          res.push_back(idx);
+          all_non_transcript=false;
+      }
+    }
+    if(all_non_transcript){
+      res.push_back(-1);
+      return(res);
+    }
+    return(res);
+  }
+  
+  bool is_fusion(vector<int>& valid_hit,float threshould=0.4){
+    for(int i:valid_hit){
+      for(int j:valid_hit){
+        if(i==j){
+          continue;
+        }
+        pair<int,int> query=this->qhits[i];
+        pair<int,int> subject=this->qhits[j];
+        float cov=calculate_cov(query,subject);
+        if(cov>0.4){
+          return(false);
+        }
+      }
+    }
+    return(true);
+  }
+  
+  void annotate_read_by_valid_hit(vector<int> valid_hit_idx){
+    // very little case, all of the hit in occupied region have diff strand with R1a
+    if(valid_hit_idx.empty()){
+      this->final_annotation="Odds_strand_conflict";
+      // ideal case, only one hit have same strand with R1a
+    }else if(valid_hit_idx.size()==1){
+      if(valid_hit_idx[0]!=-1){
+        this->final_annotation=choose_annotation(this->hit_ids[valid_hit_idx[0]],this->hit_names[valid_hit_idx[0]]);
+      }else{
+        this->final_annotation="Non-transcriptome";
+      }
+      
+      //multiple hits on same strand, fusion genes or ambiguous mapping
+    }else{
+      if(is_fusion(valid_hit_idx)){
+        this->final_annotation="Fusion: ";
+        for(int i:valid_hit_idx){
+          this->final_annotation=this->final_annotation+choose_annotation(this->hit_ids[i],this->hit_names[i])+"-";
+        }
+        this->final_annotation.erase(this->final_annotation.length()-1);
+      }else{
+        this->final_annotation="Ambiguous_mapping";
+      }
+    }
+  }
+  
+  /*!
+   * @abstract this function will only be called when this read has no more than ONE R1 adapter and mapped to genome, 
+   *           in other case, read should be split.
+   *           
+   *           Annotation will be added according to strand and position of R1 adapter, strand of hits.
+   *           
+   *           Multiple overlapped hit will be considered ambiguous or transcripts of fusion 
+   *           genes according to the proportion of overlap to hits.
+   * 
+   */
+  void add_annotation(int tech){
+    if(this->R1Aps.empty()){
+      this->final_annotation="Undetermined";
+      return;
+    }
+    int desired_hit_strand;
+    if(tech==3){
+      desired_hit_strand=reverse_strand[this->R1Ass[0]];
+    }else{
+      desired_hit_strand=this->R1Ass[0];
+    }
+    //most common condition, only one hit and one occupied region
+    if(this->hit_ids.size()==1&&this->occupiedRegions.size()==1){
+      if(this->qhitOrient[0]==desired_hit_strand){
+        this->final_annotation=choose_annotation(this->hit_ids[0],this->hit_names[0]);
+      }else{
+        if(this->qhitOrient[0]==-1){
+          this->final_annotation="Non-transcriptome";
+        }else{
+          this->final_annotation="Odds_strand_conflict";
+        }
+      }
+    //this condition should not exist in real data as num of hits >=occupied region, but I processed it here.
+    }else if(this->hit_ids.size()==1&&this->occupiedRegions.size()>1){
+      pair<int, int> region_for_R1a=occupiedRegions[find_nearest_region(this->occupiedRegions,this->R1Aps[0]-1,desired_hit_strand)];
+      if(isContaining(this->qhits[0],region_for_R1a)){
+        if(this->qhitOrient[0]==desired_hit_strand){
+          this->final_annotation=choose_annotation(this->hit_ids[0],this->hit_names[0]);
+        }else{
+          if(this->qhitOrient[0]==-1){
+            this->final_annotation="Non-transcriptome";
+          }else{
+            this->final_annotation="Odds_strand_conflict";
+          }
+        }
+      }else{
+        this->final_annotation="Odds0";
+      }
+      
+    // often happen, multiple hits to one region, maybe pseudo- or homologous-genes (ambiguous mapping) and fusion genes as well.
+    }else if(this->hit_ids.size()>1&&this->occupiedRegions.size()==1){
+      vector<int> valid_hit=filter_hit_by_strand(this->qhitOrient,desired_hit_strand);
+      this->annotate_read_by_valid_hit(valid_hit);
+    
+    //happen some times
+    }else if(this->hit_ids.size()>1&&this->occupiedRegions.size()>1){
+      vector<int> valid_hit=filter_hit_by_strand_and_region(this->occupiedRegions,this->qhits,this->qhitOrient,this->R1Aps[0],desired_hit_strand);
+      this->annotate_read_by_valid_hit(valid_hit);
+      
+    //else condition may not exist
+    }else{
+      this->final_annotation="Odds_x";
+    }
+  }
+  
+  void add_flag(char flag){
+    switch(flag){
+      case 'U':
+        this->stat="Read_umapped";
+        this->barcode="*";
+        this->barcodeStart=-1;
+        this->barcodeStrand="*";
+        this->barcodeMismatch=-1;
+        break;
+      case 'L':
+        this->stat="Read_too_long";
+        this->barcode="*";
+        this->barcodeStart=-1;
+        this->barcodeStrand="*";
+        this->barcodeMismatch=-1;
+        break;
+      case 'S':
+        this->stat="Read_too_short";
+        this->barcode="*";
+        this->barcodeStart=-1;
+        this->barcodeStrand="*";
+        this->barcodeMismatch=-1;
+        break;
+      case 'M':
+        this->stat="Barcode_missing";
+        this->barcode="*";
+        this->barcodeStart=-1;
+        this->barcodeStrand="*";
+        this->barcodeMismatch=-1;
+        break;
+      case 'R':
+        this->stat="R1a_missing";
+        this->barcode="*";
+        this->barcodeStart=-1;
+        this->barcodeStrand="*";
+        this->barcodeMismatch=-1;
+        break;
+      case 'C':
+        this->stat="Complex_structure";
+        this->barcode="*";
+        this->barcodeStart=-1;
+        this->barcodeStrand="*";
+        this->barcodeMismatch=-1;
+        break;
+    }
   }
   
   void fq_gz_write(gzFile out_file, bool trim=false) {
@@ -293,7 +575,7 @@ public:
    @param search_end: end position of search range, 1-based.
    @param seq: target sequence for searching read1 adapter.
    
-   @return null, add read1 adapter data to R1Aps, R1Ams, R1Ass.
+   @return null, add read1 adapter data to R1Aps (position, 1-based), R1Ams (mismatch), R1Ass (strand).
    */
   void findR1a(int mismatch_max, int search_start, int search_end){
     int minDist=22;
@@ -344,6 +626,80 @@ public:
     }
   }
   
+  /*!
+   * @abstract find R1a related hit region with R1a_position (1-based) and R1a_orientation.
+   *           return start position and length of entire R1a-BC-UMI-transcript region. 
+   *           
+   * @param R1a_position: R1a start position, 1-based.
+   * @param R1a_orientation
+   * 
+   * @return .first: 0-based start position; .second: length of entire region.
+   */
+  void find_complete_region_by_R1a(Read& split_container, int R1a_position, int R1a_orientation, int R1a_index){
+    pair<int,int> R1a_related_region;
+    pair<int,int> R1a_related_occ_region;
+    pair<int,int> entire_region={-1,-1};
+    bool R1a_related_occ_region_exist=false;
+    int free_region_index=0;
+    int occ_region_index=0;
+    for(pair<int,int> free_region:this->freeRegions){
+      if(isContaining(R1a_position,free_region)){
+        R1a_related_region=free_region;
+        break;
+      }
+      free_region_index++;
+    }
+    for(pair<int,int> occ_region:this->occupiedRegions){
+      if(R1a_orientation==0&&occ_region.first==R1a_related_region.second+1&&occ_region.first-R1a_position<100){
+        R1a_related_occ_region=occ_region;
+        R1a_related_occ_region_exist=true;
+        break;
+      }
+      if(R1a_orientation==3&&occ_region.second==R1a_related_region.first-1&&R1a_position-occ_region.second<100){
+        R1a_related_occ_region=occ_region;
+        R1a_related_occ_region_exist=true;
+        break;
+      }
+      occ_region_index++;
+    }
+    if(!R1a_related_occ_region_exist){
+      return;
+    }else{
+      if(R1a_orientation==0){
+        entire_region.first=R1a_related_region.first-1;
+        entire_region.second=pair_length(R1a_related_region)+pair_length(R1a_related_occ_region);
+      }else if(R1a_orientation==3){
+        entire_region.first=R1a_related_occ_region.first-1;
+        entire_region.second=pair_length(R1a_related_region)+pair_length(R1a_related_occ_region);
+      }else{
+        fprintf(stderr,"ERROR: find_complete_region_by_R1a: undefind orientation provided.");
+        exit(0);
+      }
+    }
+    
+    pair<int,int> entire_region_1_based_start_end={entire_region.first+1,entire_region.first+entire_region.second};
+    //fprintf(stderr,"%s: %i-%i\n",split_container.ID.c_str(),entire_region_1_based_start_end.first,entire_region_1_based_start_end.second);
+    
+    split_container.Seq=this->Seq.substr(entire_region.first,entire_region.second);
+    split_container.Quality=this->Quality.substr(entire_region.first,entire_region.second);
+    split_container.R1Aps.push_back(R1a_position-entire_region.first);
+    split_container.R1Ams.push_back(this->R1Ams[R1a_index]);
+    split_container.R1Ass.push_back(this->R1Ass[R1a_index]);
+    split_container.freeRegions.push_back({this->freeRegions[free_region_index].first-entire_region.first,
+                                          this->freeRegions[free_region_index].second-entire_region.first});
+    split_container.occupiedRegions.push_back({this->occupiedRegions[occ_region_index].first-entire_region.first,
+                                              this->occupiedRegions[occ_region_index].second-entire_region.first});
+    for(int i=0; i<this->qhits.size();i++){
+      if(isContaining(this->qhits[i],entire_region_1_based_start_end)){
+        split_container.qhits.push_back({this->qhits[i].first-entire_region.first,this->qhits[i].second-entire_region.first});
+        split_container.qhitOrient.push_back(this->qhitOrient[i]);
+        split_container.hit_ids.push_back(this->hit_ids[i]);
+        split_container.hit_names.push_back(this->hit_names[i]);
+      }
+    }
+    return;
+  }
+  
   string generate_R1a_summary(){
     string res="";
     if(this->R1Aps.size()==0){
@@ -376,23 +732,12 @@ public:
     if(loose){
       max_testseq_mismatch=max_testseq_mismatch+1;
     }
-//    vector<string> testsegF;
-//    vector<string> testsegR;
-//    int segments=max_testseq_mismatch+1;
     int index1=-1;
     int index2=-1;
     if(strand==0){
       testForward=this->Seq.substr(0,testRange);
       testseq=constantseq;
       index1=localAlign(testseq,testForward,max_testseq_mismatch,'l');
-      /*
-      testsegF=getMaxComplexitySegments(testseq,getMaxComplexitySegments(testseq.length(),segments));
-      int i=0;
-      while(i<testsegF.size()&&index1<0&&index2<0){
-        index1=testForward.find(testsegF[i]);
-        i++;
-      } //while
-       */
     }else if(strand==3){
       testReverse=this->Seq.substr(this->Seq.length()-testRange,testRange);
       testseq_rc=reverse_complement(constantseq);
@@ -402,18 +747,9 @@ public:
       }else{
         index2=align_result+this->Seq.length()-testRange;
       }
-      /*
-      testsegR=getMaxComplexitySegments(testseq_rc,getMaxComplexitySegments(testseq_rc.length(),segments));
-      int i=0;
-      while(i<testsegR.size()&&index1<0&&index2<0){
-        index2=testReverse.find(testsegR[i])+this->Seq.length()-testRange;
-        i++;
-      } //while
-       */
     }else{
       testForward=this->Seq.substr(0,testRange);
       testseq=constantseq;
-//      testsegF=getMaxComplexitySegments(testseq,getMaxComplexitySegments(testseq.length(),segments));
       testReverse=this->Seq.substr(this->Seq.length()-testRange,testRange);
       testseq_rc=reverse_complement(constantseq);
       index1=localAlign(testseq,testForward,max_testseq_mismatch,'l');
@@ -423,37 +759,164 @@ public:
       }else{
         index2=rv_align_result+this->Seq.length()-testRange;
       }
-//      testsegR=getMaxComplexitySegments(testseq_rc,getMaxComplexitySegments(testseq_rc.length(),segments));
-//      int j=0;
-//      while(j<testsegF.size()&&index1<0){
-//        index1=testForward.find(testsegF[j]);
-//        j++;
-//      } //while
-//      int i=0;
-//      while(i<testsegR.size()&&index2<0){
-//        index2=testReverse.find(testsegR[i]);
-//        i++;
-//      } //while
-//      if(index2>=0){
-//        index2=index2+Seq.length()-testRange;
-//      }
     }
     res.first=index1;
     res.second=index2;
     return res;
   } //isConstantSequenceContaining
   
+  /*!
+   * @abstract genrate kmers from whole read sequence
+   * 
+   * @param k: kmer length
+   * 
+   * @return fill in this->Kmers
+   */
   void genrateKmer(int k){
-    int kmerSize=k;
       const int len=this->Seq.length();
       for(int j=0;j+k<=len;j++){
         string kmer=this->Seq.substr(j,k);
-        //        cout << kmer << endl;
-        Kmers.push_back(kmer);
+        this->Kmers.push_back(kmer);
       }
     }
   
-  int identifyBarcodes(BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds, int maxMismatch, int tech, const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false){
+  /*!
+   * @abstract genrate kmers by start and end position desired
+   * 
+   * @param k: kmer length
+   * @param start: 1-based, do not care if end greater than length
+   * @param end: 1-based, do not care if end greater than length
+   * 
+   * @return key: kmer start position, 1-based, value: kmer sequence
+   * 
+   */
+  unordered_map<int, string> genrateKmer(int k, int start, int end){
+    unordered_map<int, string> kmers;
+    const int len=this->Seq.length();
+    start--;
+    if(start<0){
+      start=0;
+    }
+    if(start>len-k){
+      return(kmers);
+    }
+    if(end>len-k){
+      end=len-k;
+    }else{
+      end=end-k;
+    }
+    for(int j=start;j<=end;j++){
+      kmers[j]=this->Seq.substr(j,k);
+    }
+    return(kmers);
+  }
+  
+  /*!
+   * @abstract identify barcodes with read annotation
+   * 
+   */
+  
+  void identifyBarcodes(vector<Read>& parent_block, BarcodeFile& barcodes, vector<int> segments, int maxMismatch, int tech, unordered_map<string, ReadAnno>& annoMap,
+   const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false){
+    int barcode_length=barcodes.barcodes[0].length();
+    //if read too long, discard it
+    if(this->Seq.length()>=100000){
+      this->add_flag('L');
+      return;
+    }
+    if(this->Kmers.size()==0){
+      this->genrateKmer(barcode_length);
+    }
+    
+    if(!annoMap[this->ID].read_id.empty()){
+      vector<pair<int,int>> freeRegions=annoMap[this->ID].free_regions;
+      this->freeRegions=freeRegions;
+      this->qhits=annoMap[this->ID].qhits;
+      this->hit_overlaps=annoMap[this->ID].hit_overlaps;
+      this->qhitOrient=annoMap[this->ID].read_orientation;
+      this->occupiedRegions=annoMap[this->ID].occupied_regions;
+      this->hit_ids=annoMap[this->ID].gene_id;
+      this->hit_names=annoMap[this->ID].gene_name;
+    }
+
+    if(this->qhits.empty()){
+      this->add_flag('U');
+      return;
+    }
+    
+    if(this->R1Aps.empty()){
+      for(pair<int,int> region:freeRegions){
+        if(region.second-region.first+1<TENX_R1.length()){
+          continue;
+        }else{
+          this->findR1a(maxMismatch*3,region.first,region.second);
+        }
+      }
+    }
+    if(this->R1Aps.empty()){
+      if(dtw){
+        this->identifybarcodesDTW(wl_db,model);
+        if(this->barcode=="*"){
+          this->add_flag('M');
+          return;
+        }
+      }else{
+        this->add_flag('R');
+        return;
+      }
+    }else if(this->R1Ams.size()==1){
+      this->OUTER=R1Aps[0];
+      unordered_map<int, string> kmers;
+      if(this->R1Ass[0]==0){
+        kmers=genrateKmer(barcode_length,this->R1Aps[0]+1+TENX_R1.length()-maxMismatch*2,this->R1Aps[0]+1+TENX_R1.length()+barcode_length+maxMismatch);
+        for(auto kmer:kmers){
+          findmismatchingbarcodebykmer(barcodes,segments,kmer.second,kmer.first+1,"forward",maxMismatch);
+        }
+      }else{
+        kmers=genrateKmer(barcode_length,this->R1Aps[0]+1-barcode_length-maxMismatch,this->R1Aps[0]+1+maxMismatch*2);
+        for(auto kmer:kmers){
+          findmismatchingbarcodebykmer(barcodes,segments,kmer.second,kmer.first+1,"reverse",maxMismatch);
+        }
+      }
+      //if multiple barcode found, get the barcode with min mismatch
+      if(this->barcode_mismatches.size()>1){
+        int minPosition=min_element(this->barcode_mismatches.begin(),this->barcode_mismatches.end()) - this->barcode_mismatches.begin();
+        this->barcode=barcode_intolerance_detail[minPosition];
+        this->barcodeStart=barcode_intolerance_indices[minPosition];
+        this->barcodeMismatch=barcode_mismatches[minPosition];
+      }
+      
+      //if barcode can not be found through alignment based method, use DTW instead 
+      if((this->barcode.length()==0||this->barcode.length()==1)&&dtw){
+        this->identifybarcodesDTW(wl_db,model);
+      }
+      
+      if(this->barcode!="*"){
+        this->add_annotation(tech);
+      }else{
+        this->add_flag('M');
+      }
+    }else{
+      this->add_flag('C');
+      for(int i=0;i<this->R1Aps.size();++i){
+        Read split_read;
+        split_read.ID=this->ID+"-"+to_string(i);
+        find_complete_region_by_R1a(split_read,this->R1Aps[i],this->R1Ass[i],i);
+        if(!split_read.Seq.empty()){
+          parent_block.push_back(split_read);
+          continue;
+        }else{
+          continue;
+        }
+      }
+    }
+  }
+  
+  /*!
+   * @abstract identify barcodes without mapping info
+   * 
+   */
+  void identifyBarcodes(BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds, int maxMismatch, int tech, const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false){
     int barcode_length=barcodes.barcodes[0].length();
     int kmer_index_start=-1;
     int kmer_index_end=-1;
@@ -471,28 +934,14 @@ public:
     
     //if read too long, discard it
     if(this->Seq.length()>=100000){
-      this->INNER=-1;
-      this->OUTER=-1;
-      this->barcode="*";
-      this->barcodeStrand="*";
-      this->barcodeStart=-1;
-      this->barcodeMismatch=-1;
-      this->stat="Read_too_long";
-      //      this->printBarcodeInfo();
-      return 0;
+      this->add_flag('L');
+      return;
     }
     
     //if read shorter than barcode search range * 2, discard
     if(this->Seq.length()<=maxDistToEnds*2){
-      this->INNER=-1;
-      this->OUTER=-1;
-      this->barcode="*";
-      this->barcodeStrand="*";
-      this->barcodeStart=-1;
-      this->barcodeMismatch=-1;
-      this->stat="Read_too_short";
-//      this->printBarcodeInfo();
-      return 0;
+      this->add_flag('S');
+      return;
     }
     if(this->Kmers.size()==0){
       this->genrateKmer(barcode_length);
@@ -503,10 +952,10 @@ public:
       this->polyAT_containing=1;
       if(tech==5){
         inner_stat=isConstantSequenceContaining(TENX_TSO,maxDistToEnds,2,0);
-        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,0,true);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,6,0,true);
       }else if(tech==3){
         inner_stat=isConstantSequenceContaining(POLYT,maxDistToEnds,0,0);
-        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,0,true);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,6,0,true);
       }else{
         cout << "Failed, 5' or 3' not specified or specified a wrong argument";
       }
@@ -537,10 +986,10 @@ public:
       constant_seq_strand=3;
       if(tech==5){
         inner_stat=isConstantSequenceContaining(TENX_TSO,maxDistToEnds,2,3);
-        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,3,true);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,6,3,true);
       }else if(tech==3){
         inner_stat=isConstantSequenceContaining(POLYT,maxDistToEnds,0,3);
-        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,3,true);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,6,3,true);
       }else{
         cout << "Failed, 5' or 3' not specified or specified a wrong argument";
       }
@@ -569,10 +1018,10 @@ public:
       this->polyAT_containing=0;
       if(tech==5){
         inner_stat=isConstantSequenceContaining(TENX_TSO,maxDistToEnds,2,-1);
-        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,-1,true);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,6,-1,true);
       }else if(tech==3){
         inner_stat=isConstantSequenceContaining(POLYT,maxDistToEnds,0,-1);
-        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,3,-1,true);
+        outer_stat=isConstantSequenceContaining(TENX_R1,maxDistToEnds,6,-1,true);
       }else{
         cout << "Failed, 5' or 3' not specified or specified a wrong argument";
       }
@@ -584,8 +1033,7 @@ public:
         this->barcodeStart=-1;
         this->barcodeMismatch=-1;
         this->stat="ICS_R1_missing";
-//        this->printBarcodeInfo();
-        return 0;
+        return;
       }else if(inner_stat.first<0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second<0){
         this->INNER=-1;
         this->OUTER=outer_stat.first+1;
@@ -605,10 +1053,8 @@ public:
         this->barcodeStrand="*";
         this->barcodeStart=-1;
         this->barcodeMismatch=-1;
-//        this->stat="ICS_missing_R1_both_ends";
         this->stat="Dual_header";
-//        this->printBarcodeInfo();
-        return 0;
+        return;
       }else if(inner_stat.first>=0&&outer_stat.first<0&&inner_stat.second<0&&outer_stat.second<0){
         this->INNER=inner_stat.first+1;
         this->OUTER=-1;
@@ -628,10 +1074,8 @@ public:
         this->barcodeStrand="*";
         this->barcodeStart=-1;
         this->barcodeMismatch=-1;
-//        this->stat="ICS_R1_different_end";
         this->stat="Dual_header";
-//        this->printBarcodeInfo();
-        return 0;
+        return;
       }else if(inner_stat.first>=0&&outer_stat.first>=0&&inner_stat.second<0&&outer_stat.second>=0){
         this->INNER=inner_stat.first+1;
         this->OUTER=outer_stat.first+1;
@@ -651,10 +1095,8 @@ public:
         this->barcodeStrand="*";
         this->barcodeStart=-1;
         this->barcodeMismatch=-1;
-//        this->stat="ICS_R1_different_end";
         this->stat="Dual_header";
-//        this->printBarcodeInfo();
-        return 0;
+        return;
       }else if(inner_stat.first<0&&outer_stat.first<0&&inner_stat.second>=0&&outer_stat.second>=0){
         this->INNER=inner_stat.second+1;
         this->OUTER=outer_stat.second+1;
@@ -674,10 +1116,8 @@ public:
         this->barcodeStrand="*";
         this->barcodeStart=-1;
         this->barcodeMismatch=-1;
-//        this->stat="ICS_both_ends_R1_missing";
         this->stat="Dual_header";
-//        this->printBarcodeInfo();
-        return 0;
+        return;
       }else if(inner_stat.first>=0&&outer_stat.first>=0&&inner_stat.second>=0&&outer_stat.second<0){
         this->INNER=inner_stat.first+1;
         this->OUTER=outer_stat.first+1;
@@ -698,10 +1138,8 @@ public:
           this->barcodeStrand="*";
           this->barcodeStart=-1;
           this->barcodeMismatch=-1;
-//          this->stat="ICS_R1_both_ends";
           this->stat="Dual_header";
-//          this->printBarcodeInfo();
-          return 0;
+          return;
         }else if(inner_stat.first<outer_stat.first&&inner_stat.second<outer_stat.second){
           this->INNER=inner_stat.second+1;
           this->OUTER=outer_stat.second+1;
@@ -721,10 +1159,8 @@ public:
           this->barcodeStrand="*";
           this->barcodeStart=-1;
           this->barcodeMismatch=-1;
-//          this->stat="ICS_R1_wrongly_oriented";
           this->stat="Dual_header";
-//          this->printBarcodeInfo();
-          return 0;
+          return;
         }
       }
     }
@@ -734,63 +1170,58 @@ public:
       this->barcodeStart=-1;
       this->barcodeMismatch=-1;
       this->stat="ICS_R1_wrongly_oriented";
-//      this->printBarcodeInfo();
-      return 0;
+      return;
     }
-//    cout << this->ID << "," << this->OUTER << "," << this->INNER << endl;
-//    cout << "determine kmers by inner and outer constant seq start index" << endl;
     std::vector<string> kmers;
     //determine kmers by inner and outer constant seq start index
     
     //1. both CS found at left end
     if(this->INNER>0&&this->OUTER>0&&this->INNER<Seq.length()/2){
-      kmer_index_start=this->OUTER-1+TENX_R1.length()-4;
-      kmers.insert(kmers.end(),this->Kmers.begin()+this->OUTER-1+TENX_R1.length()-4,this->Kmers.begin()+this->OUTER-1+TENX_R1.length()+4);
+      kmer_index_start=this->OUTER-1+TENX_R1.length()-6;
+      kmers.insert(kmers.end(),this->Kmers.begin()+this->OUTER-1+TENX_R1.length()-6,this->Kmers.begin()+this->OUTER-1+TENX_R1.length()+6);
       
     //2. both CS found at right end
     }else if(this->INNER>0&&this->OUTER>0&&this->INNER>Seq.length()/2){
-      kmer_index_start=this->OUTER-1-barcode_length-4;
-      kmers.insert(kmers.end(),this->Kmers.begin()+this->OUTER-1-barcode_length-4,this->Kmers.begin()+this->OUTER-1-barcode_length+4);
+      kmer_index_start=this->OUTER-1-barcode_length-6;
+      kmers.insert(kmers.end(),this->Kmers.begin()+this->OUTER-1-barcode_length-6,this->Kmers.begin()+this->OUTER-1-barcode_length+6);
       
     //3. only ICS found at left end
     }else if(this->INNER>0&&this->OUTER<0&&this->INNER<Seq.length()/2){
-      if(this->INNER-1-barcode_length-umiLength-4<0){
+      if(this->INNER-1-barcode_length-umiLength-6<0){
         this->barcode="*";
         this->barcodeStrand="*";
         this->barcodeStart=-1;
         this->barcodeMismatch=-1;
-//        this->stat="CS_too_close_to_end_or_to_each_other";
         this->stat="Read_too_short";
-        return 0;
+        return;
       }else{
-        kmer_index_start=this->INNER-1-barcode_length-umiLength-4;
-        kmers.insert(kmers.end(),this->Kmers.begin()+this->INNER-1-barcode_length-umiLength-4,this->Kmers.begin()+this->INNER-1-barcode_length-umiLength+4);
+        kmer_index_start=this->INNER-1-barcode_length-umiLength-6;
+        kmers.insert(kmers.end(),this->Kmers.begin()+this->INNER-1-barcode_length-umiLength-6,this->Kmers.begin()+this->INNER-1-barcode_length-umiLength+6);
       }
       
     //4. only OCS found at left end
     }else if(this->INNER<0&&this->OUTER>0&&this->OUTER<Seq.length()/2){
-      kmer_index_start=this->OUTER-1+TENX_R1.length()-4;
-      kmers.insert(kmers.end(),this->Kmers.begin()+this->OUTER-1+TENX_R1.length()-4,this->Kmers.begin()+this->OUTER-1+TENX_R1.length()+4);
+      kmer_index_start=this->OUTER-1+TENX_R1.length()-6;
+      kmers.insert(kmers.end(),this->Kmers.begin()+this->OUTER-1+TENX_R1.length()-6,this->Kmers.begin()+this->OUTER-1+TENX_R1.length()+6);
       
     //5. only ICS found at right end
     }else if(this->INNER>0&&this->OUTER<0&&this->INNER>Seq.length()/2){
-      if(this->INNER+TENX_TSO.length()+umiLength+barcode_length+4-1>this->Seq.length()){
+      if(this->INNER+TENX_TSO.length()+umiLength+barcode_length+6-1>this->Seq.length()){
         this->barcode="*";
         this->barcodeStrand="*";
         this->barcodeStart=-1;
         this->barcodeMismatch=-1;
-//        this->stat="CS_too_close_to_end_or_to_each_other";
         this->stat="Read_too_short";
-        return 0;
+        return;
       }else{
-        kmer_index_start=this->INNER-1+TENX_TSO.length()+umiLength-4;
-        kmers.insert(kmers.end(),this->Kmers.begin()+this->INNER-1+TENX_TSO.length()+umiLength-4,this->Kmers.begin()+this->INNER-1+TENX_TSO.length()+umiLength+4);
+        kmer_index_start=this->INNER-1+TENX_TSO.length()+umiLength-6;
+        kmers.insert(kmers.end(),this->Kmers.begin()+this->INNER-1+TENX_TSO.length()+umiLength-6,this->Kmers.begin()+this->INNER-1+TENX_TSO.length()+umiLength+6);
       }
       
     //6. only OCS found at right end
     }else if(this->INNER<0&&this->OUTER>0&&this->OUTER>Seq.length()/2){
-      kmer_index_start=this->OUTER-1-barcode_length-4;
-      kmers.insert(kmers.end(),this->Kmers.begin()+this->OUTER-1-barcode_length-4,this->Kmers.begin()+this->OUTER-1-barcode_length+4);
+      kmer_index_start=this->OUTER-1-barcode_length-6;
+      kmers.insert(kmers.end(),this->Kmers.begin()+this->OUTER-1-barcode_length-6,this->Kmers.begin()+this->OUTER-1-barcode_length+6);
       
     //7. both CS not found
     }else{
@@ -799,7 +1230,7 @@ public:
       this->barcodeStart=-1;
       this->barcodeMismatch=-1;
       this->stat="ICS_R1_missing";
-      return 0;
+      return;
     }
     
     //if no valid kmer can be used
@@ -808,122 +1239,28 @@ public:
       this->barcodeStrand="*";
       this->barcodeStart=-1;
       this->barcodeMismatch=-1;
-//      this->stat="CS_too_close_to_end_or_to_each_other";
       this->stat="Read_too_short";
-      return 0;
+      return;
     }
     
     //for kmers, try to find exact match in barcode list, else to find ambiguous match
     for(int j=0;j<kmers.size();j++){
       int index=kmer_index_start+j+1;
-      /*
-       if(j<=kmers.size()/2){
-       index=j+1;
-       }else{
-       index=Reads[i].Seq.length()-maxDistToEnds+j-(kmers.size()/2)+1;
-       }
-       */
-      if(barcodes.barcode_ori[kmers[j]].length()!=0&&constant_seq_strand==0){
-        this->barcode=kmers[j];
-        this->barcodeStrand="original";
-        this->barcodeStart=index;
-        this->barcodeMismatch=0;
-        this->stat="fine";
-        this->barcode_in_tolerance++;
-        this->barcode_intolerance_detail.push_back(kmers[j]);
-        this->barcode_intolerance_indices.push_back(index);
-        this->barcode_mismatches.push_back(0);
-//        this->matched_kmer_quality=this->Quality.substr(index,16);
-        break;
-      }else if(barcodes.barcode_rc[kmers[j]].length()!=0&&constant_seq_strand==3){
-        this->barcode=barcodes.barcode_rc[kmers[j]];
-        this->barcodeStrand="reverse_complement";
-        this->barcodeStart=index;
-        this->barcodeMismatch=0;
-        this->stat="fine";
-        this->barcode_in_tolerance++;
-        this->barcode_intolerance_indices.push_back(index);
-        this->barcode_intolerance_detail.push_back(barcodes.barcode_rc[kmers[j]]);
-        this->barcode_mismatches.push_back(0);
-//        this->matched_kmer_quality=this->Quality.substr(index,16);
-        break;
-      }
+      findexactbarcodebykmer(barcodes,kmers[j],index,num2rna[constant_seq_strand]);
     } //for(int j=0;j<kmers.size();j++)
-    //if exact match found, stop function.
+    
     if(this->barcode.length()!=0){
 //      substring to generate a seq downstream barcode for 10nt as UMI, 
 //      and modify reverse_com seq to original one, cut off adapter to UMI
-      this->guessUMI(tech);
-      return 0;
+      //this->guessUMI(tech);
       //start to find ambiguous match
     }else{
-      unordered_map<string, string> barcode_record;
-      //cout << "start to find ambiguous hits.." << endl;
       for(int j=0;j<kmers.size();j++){
         int index=kmer_index_start+j+1;
-        //cout << kmers[j] << endl;
-        //first is index in barcodes.barcode_dict, second is strand
-        vector<pair<int, int>> candidates;
-        vector<string> kmer_segment=getMaxComplexitySegments(kmers[j],segments);
-        for(int n=0;n<kmer_segment.size();n++){
-          string query=kmer_segment[n]+to_string(n)+to_string(constant_seq_strand);
-          candidates.insert(candidates.end(),barcodes.barcode_dict[query].begin(),barcodes.barcode_dict[query].end());
-          /*
-          if(kmers[j]=="AACTTATTCGTTGTTT"){
-            cout << query << endl;
-            vector<pair<int,int>> outs=barcodes.barcode_dict[query];
-            for(int i=0;i<outs.size();++i){
-              cout << barcodes.barcodes[outs[i].first-1] << endl;
-            }
-          }
-           */
-        }
-        if(candidates.size()==0){
-          continue;
-        }else{
-          for(int m=0;m<candidates.size();m++){
-            int barcode_dict_index=candidates[m].first-1;
-            string candidate_ori=barcodes.barcodes[barcode_dict_index];
-            if(barcode_record.count(candidate_ori)){
-              continue;
-            }
-            barcode_record[candidate_ori]=candidate_ori;
-            string candidate=barcodes.barcodes[barcode_dict_index];
-            int strand=candidates[m].second;
-            if(strand==1){
-              candidate=reverse(candidate);
-            }else if(strand==2){
-              candidate=complement(candidate);
-            }else if(strand==3){
-              candidate=reverse_complement(candidate);
-            }else{
-              if(strand!=0){
-                cout << "Unsupported strand coding, Read: " << this->ID << ", kmer: " << kmers[j] << endl;
-              }
-            }
-            int mismatch=editDistance(candidate,kmers[j],maxMismatch);
-            //take care here!!!! once kmer meets the threshould, it will be considered to be the barcode, 
-            //even there may be better ones after it.
-            if(mismatch>maxMismatch){
-              continue;
-            }else{
-              this->barcode=candidate_ori;
-              this->barcodeStrand=num_to_strand[strand];
-              this->barcodeStart=index;
-              this->barcodeMismatch=mismatch;
-              this->stat="fine";
-              this->barcode_in_tolerance++;
-              this->barcode_intolerance_detail.push_back(candidate_ori);
-              this->barcode_intolerance_indices.push_back(index);
-              this->barcode_mismatches.push_back(mismatch);
-//              this->matched_kmer_quality=this->Quality.substr(index,16);
-              continue;
-            }
-          } //for(int m=0;m<candidates.size();m++)
-        }// if(candidates.size()==0) else
+        findmismatchingbarcodebykmer(barcodes, segments, kmers[j], index, num2rna[constant_seq_strand], maxMismatch);
       }//for(int j=0;j<kmers.size();j++)
     }// if(tmpRead.barcode.length()!=0) else
-    //check again if barcodes found, if not, fill the field with '*'.
+    
     //if multiple barcode found, get the barcode with min mismatch
     if(barcode_mismatches.size()>1){
       int minPosition=min_element(barcode_mismatches.begin(),barcode_mismatches.end()) - barcode_mismatches.begin();
@@ -934,24 +1271,14 @@ public:
     
     //if barcode can not be found through alignment based method, use DTW instead 
     if((this->barcode.length()==0||this->barcode.length()==1)&&dtw){
-//      cout << "identify BC: read " << this->ID << " started DTW staff" << endl;
       this->identifybarcodesDTW(wl_db,model);
     }
     
-    if(this->barcode.length()!=0&&this->barcode.length()!=1&&this->barcodeStart!=-1){
-    //substring to generate a seq downstream barcode for 10nt as UMI, 
-    //and modify reverse_com seq to original one, cut off adapter to UMI
-        //cout << this->barcodeStart << endl;
-        this->guessUMI(tech);
-    }else if(this->barcode.length()==barcode_length){
-      return 0;
+    if(this->barcode!="*"){
+      return;
     }else{
-      this->barcode="*";
-      this->barcodeStrand="*";
-      this->barcodeStart=-1;
-      this->barcodeMismatch=-1;
-      this->stat="barcode_missing";
-      return 0;
+      this->add_flag('M');
+      return;
     }
   } //identifyBarcodes
 
@@ -959,7 +1286,7 @@ private:
   void guessUMI(int tech){
     if(tech==3){
       if(this->barcode.find("*")!=0){
-        if(this->barcodeStrand.find("original")==0){
+        if(this->barcodeStrand.find("forward")==0){
           int UMI_start=this->barcodeStart+16-1;
           int UMI_end=UMI_start+12-1;
           this->UMI=this->Seq.substr(UMI_start,12);
@@ -977,7 +1304,7 @@ private:
       }
     }else if(tech==5){
       if(this->barcode.find("*")!=0){
-        if(this->barcodeStrand.find("original")==0){
+        if(this->barcodeStrand.find("forward")==0){
           int UMI_start=this->barcodeStart+16-1;
           int UMI_end=UMI_start+10-1;
           this->UMI=this->Seq.substr(UMI_start,10);
@@ -1077,7 +1404,7 @@ private:
           //dtw3_bt(lvl+the_res.location, wl_db->lvl[wl_resq[1].location], qual+the_res.location, qual2+the_res.location, 33,r );
           this->stat="fine_DTW";
           this->barcode=getSeq(wl_db,wl_resq[0].location,22);
-          this->barcodeStrand="orignal";
+          this->barcodeStrand="forward";
           this->barcodeMismatch=(int)(wl_resq[0].distance-the_res.distance);
 //          printf("final %s %.4f forward %s %.4f %s %.4f\n", ID.c_str(), the_res.distance,getSeq(wl_db,wl_resq[0].location,22),wl_resq[0].distance,getSeq(wl_db,wl_resq[1].location,22),wl_resq[1].distance);
         }else{
@@ -1126,7 +1453,7 @@ private:
           //dtw3_bt(lvl+the_res.location-19+wl_resq[0].flag, wl_db->lvl_r[wl_resq[0].location], qual+the_res.location-19+wl_resq[0].flag, qual2+the_res.location-19+wl_resq[0].flag, 33,r );
           this->stat="fine_DTW";
           this->barcode=getSeq(wl_db,wl_resq[0].location,22);
-          this->barcodeStrand="reverse_complement";
+          this->barcodeStrand="reverse";
           this->barcodeMismatch=(int)(wl_resq[0].distance-the_res.distance);
           //dtw3_bt(lvl+the_res.location-19+wl_resq[1].flag, wl_db->lvl_r[wl_resq[1].location], qual+the_res.location-19+wl_resq[1].flag, qual2+the_res.location-19+wl_resq[1].flag, 33,r );
           //printf("final\t%s\t%.4f\treverse\t%s\t%.4f\t%s\t%.4f\n", ID.c_str(), the_res.distance,getSeq(wl_db,wl_resq[0].location,22),wl_resq[0].distance,getSeq(wl_db,wl_resq[1].location,22),wl_resq[1].distance);
@@ -1138,17 +1465,109 @@ private:
       }
     
     }
+  } //void identifybarcodesDTW
+  
+  /*!
+   * @abstract find exact matched barcode with a kmer sequence
+   * 
+   * @param barcodes: barcode dicts, refer to class BarcodeFile
+   * @param kmer: kmer sequence
+   * @param kmer_pos: kmer start position on read, 1-based
+   * @param kmer_strand: "forward"/"reverse"
+   */
+  void findexactbarcodebykmer(BarcodeFile& barcodes, string kmer, int kmer_pos, string kmer_strand){
+    if(barcodes.barcode_ori[kmer].length()!=0&&kmer_strand=="forward"){
+      this->barcode=kmer;
+      this->barcodeStrand="forward";
+      this->barcodeStart=kmer_pos;
+      this->barcodeMismatch=0;
+      this->stat="fine";
+      this->barcode_in_tolerance++;
+      this->barcode_intolerance_detail.push_back(kmer);
+      this->barcode_intolerance_indices.push_back(kmer_pos);
+      this->barcode_mismatches.push_back(0);
+    }else if(barcodes.barcode_rc[kmer].length()!=0&&kmer_strand=="reverse"){
+      this->barcode=barcodes.barcode_rc[kmer];
+      this->barcodeStrand="reverse";
+      this->barcodeStart=kmer_pos;
+      this->barcodeMismatch=0;
+      this->stat="fine";
+      this->barcode_in_tolerance++;
+      this->barcode_intolerance_indices.push_back(kmer_pos);
+      this->barcode_intolerance_detail.push_back(barcodes.barcode_rc[kmer]);
+      this->barcode_mismatches.push_back(0);
+    }
+  } // void findexactbarcodebykmer
+  
+  /*!
+   * @abstract find barcode with mismatch with a kmer sequence
+   * 
+   * @param barcodes: barcode dicts, refer to class BarcodeFile
+   * @param kmer: kmer sequence
+   * @param kmer_pos: kmer start position on read, 1-based
+   * @param kmer_strand: "forward"/"reverse"
+   * @param max_mismatch
+   */
+  void findmismatchingbarcodebykmer(BarcodeFile& barcodes, vector<int> segments, string kmer, int kmer_pos, string kmer_strand, int max_mismatch){
+    //first is index in barcodes.barcode_dict, second is strand
+    vector<pair<int, int>> candidates;
+    vector<string> kmer_segment=getMaxComplexitySegments(kmer,segments);
+    for(int n=0;n<kmer_segment.size();n++){
+      string query=kmer_segment[n]+to_string(n)+to_string(strand2num[kmer_strand]);
+      candidates.insert(candidates.end(),barcodes.barcode_dict[query].begin(),barcodes.barcode_dict[query].end());
+    }
+    if(candidates.size()==0){
+      return;
+    }else{
+      for(int m=0;m<candidates.size();m++){
+        int barcode_dict_index=candidates[m].first-1;
+        string candidate_ori=barcodes.barcodes[barcode_dict_index];
+        if(std::count(this->barcode_intolerance_detail.begin(),this->barcode_intolerance_detail.end(),candidate_ori)){
+          continue;
+        }
+        string candidate=barcodes.barcodes[barcode_dict_index];
+        int strand=candidates[m].second;
+        if(strand==1){
+          candidate=reverse(candidate);
+        }else if(strand==2){
+          candidate=complement(candidate);
+        }else if(strand==3){
+          candidate=reverse_complement(candidate);
+        }else{
+          if(strand!=0){
+            cout << "Unsupported strand coding, Read: " << this->ID << ", kmer: " << kmer << endl;
+          }
+        }
+        int mismatch=editDistance(candidate,kmer,max_mismatch);
+        //take care here!!!! once kmer meets the threshould, it will be considered to be the barcode, 
+        //even there may be better ones after it.
+        if(mismatch>max_mismatch){
+          continue;
+        }else{
+          this->barcode=candidate_ori;
+          this->barcodeStrand=num2rna[strand];
+          this->barcodeStart=kmer_pos;
+          this->barcodeMismatch=mismatch;
+          this->stat="fine";
+          this->barcode_in_tolerance++;
+          this->barcode_intolerance_detail.push_back(candidate_ori);
+          this->barcode_intolerance_indices.push_back(kmer_pos);
+          this->barcode_mismatches.push_back(mismatch);
+          //              this->matched_kmer_quality=this->Quality.substr(index,16);
+          continue;
+        }
+      } //for(int m=0;m<candidates.size();m++)
+    }// if(candidates.size()==0) else
   }
   
 };
+
 
 struct AmbiguousBarcode{
   string seq;
   int strand;
   int mismatch;
-  };
-
-
+};
 
 class ReadFile{
 private:
@@ -1260,7 +1679,7 @@ public:
       tmpRead.Seq=seq->seq.s;
       tmpRead.Quality=seq->qual.s;
 //      cout << "identifying R1a" << endl;
-      tmpRead.findR1a(4,1,874);
+      tmpRead.findR1a(4,1,tmpRead.Seq.length());
       string R1asum=tmpRead.generate_R1a_summary();
       cout << tmpRead.ID << "\t" << R1asum << endl;
     }
@@ -1285,11 +1704,6 @@ public:
       string read_id;
       pair<int, string> barcodeStar_strand;
       getline(read_summary,record,'\n');
-      //      cout << line << endl;
-      //      line_counter++;
-      //      if(line_counter%100000==0){
-      //        cout << "processed " << line_counter << " line" << endl;
-      //      }
       if(record==""){
         continue;
       }
@@ -1321,7 +1735,7 @@ public:
         fq_gz_write(RawReadFile,tmpRead);
         continue;
       }
-      if(tmpRead.barcodeStrand=="original"){
+      if(tmpRead.barcodeStrand=="forward"){
           Read splitRead1;
           Read splitRead2;
           int first_read_length;
@@ -1554,11 +1968,6 @@ public:
       string read_id;
       pair<int, string> barcodeStar_strand;
       getline(read_summary,record,'\n');
-//      cout << line << endl;
-//      line_counter++;
-//      if(line_counter%100000==0){
-//        cout << "processed " << line_counter << " line" << endl;
-//      }
       if(record==""){
         continue;
       }
@@ -1586,7 +1995,7 @@ public:
       tmpRead.barcodeStrand=read2barcodeStar_strand[tmpRead.ID].second;
       tmpRead.barcodeStart=read2barcodeStar_strand[tmpRead.ID].first;
       read_length=tmpRead.Seq.length();
-      if(tmpRead.barcodeStrand=="original"){
+      if(tmpRead.barcodeStrand=="forward"){
         mapping_start=min(read2clippos[tmpRead.ID][0],read2clippos[tmpRead.ID][2]);
         if(mapping_start-tmpRead.barcodeStart>=200){
           read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << mapping_start << "\t" << -1 << "\t" << "complex_fusion" << endl;
@@ -1657,7 +2066,9 @@ public:
   
   //active constructor
   //constructor generate output while reading reads
-  ReadFile(const char* filename, BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds, int maxMismatch, int tech, int threadnum, const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false){
+  ReadFile(const char* filename, BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds,
+           int maxMismatch, int tech, int threadnum, unordered_map<string, ReadAnno>& annoMap, 
+           const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false,bool debug=false){
     string output_filename="filtered.fastq.gz";
     string trimmed_output_filename="trimmed_filtered.fastq.gz";
     gzFile outFile=gzopen(output_filename.c_str(), "wb2");
@@ -1678,25 +2089,31 @@ public:
         tmpRead.ID=seq->name.s;
         tmpRead.Seq=seq->seq.s;
         tmpRead.Quality=seq->qual.s;
+        if(debug){
+          fprintf(stderr,"%s\n",tmpRead.ID.c_str());
+          //tmpRead.identifyBarcodes(barcodes,segments,maxDistToEnds,maxMismatch, tech, model, wl_db, dtw);
+          //tmpRead.identifyBarcodes(barcodes,segments,maxMismatch,tech, annoMap, model, wl_db, dtw);
+          //tmpRead.printBarcodeInfo();
+          continue;
+        }
         Reads.push_back(tmpRead);
         if(Reads.size()==100){
           Readmatrix.push_back(Reads);
           threadcount++;
-//          cout << "thread count: " << threadcount << endl;
           Reads.clear();
           if(Readmatrix.size()==threadnum){
-//            cout << "excuting in if(threadcount==threadnum)" << endl;
             #pragma omp parallel for
             for(int i=0;i<Readmatrix.size();++i){
-//              cout << "thread: " << i << endl;
               BarcodeFile threadbarcode=barcodes;
               vector<int> threadsegments=segments;
               int threadmaxDistToEnds=maxDistToEnds;
               int threadmaxMismatch=maxMismatch;
               int threadtech=tech;
-//              cout << "start bc i" << endl;
-              identifyBarcodesinBlock(Readmatrix[i],threadbarcode,threadsegments,threadmaxDistToEnds,threadmaxMismatch,threadtech, model, wl_db, dtw);
-//              cout << "end bc i" << endl;
+              if(annoMap.empty()){
+                identifyBarcodesinBlock(Readmatrix[i],threadbarcode,threadsegments,threadmaxDistToEnds,threadmaxMismatch,threadtech, model, wl_db, dtw);
+              }else{
+                identifyBarcodesinBlockWithAnno(Readmatrix[i],threadbarcode,threadsegments,threadmaxMismatch,threadtech,annoMap, model, wl_db, dtw);
+              }
             } //for(int i=0;i<threadnum;++i)
             
             writeReadData(Readmatrix,streambarcodeinfo,streamFQ,streamFQ_trim);
@@ -1716,7 +2133,6 @@ public:
         Readmatrix.push_back(Reads);
         threadcount++;
         Reads.clear();
-//        cout << "excuting in if(threadcount==threadnum)else" << endl;
         #pragma omp parallel for
         for(int i=0;i<Readmatrix.size();++i){
           BarcodeFile threadbarcode=barcodes;
@@ -1724,7 +2140,11 @@ public:
           int threadmaxDistToEnds=maxDistToEnds;
           int threadmaxMismatch=maxMismatch;
           int threadtech=tech;
-          identifyBarcodesinBlock(Readmatrix[i],threadbarcode,threadsegments,threadmaxDistToEnds,threadmaxMismatch,threadtech, model, wl_db, dtw);
+          if(annoMap.empty()){
+            identifyBarcodesinBlock(Readmatrix[i],threadbarcode,threadsegments,threadmaxDistToEnds,threadmaxMismatch,threadtech, model, wl_db, dtw);
+          }else{
+            identifyBarcodesinBlockWithAnno(Readmatrix[i],threadbarcode,threadsegments,threadmaxMismatch,threadtech,annoMap, model, wl_db, dtw);
+          }
         } //for(int i=0;i<Readmatrix.size();++i)
 
         writeReadData(Readmatrix,streambarcodeinfo,streamFQ,streamFQ_trim);
@@ -1760,13 +2180,24 @@ public:
     }
   }
   
-  void identifyBarcodesinBlock(vector<Read>& blockreads,BarcodeFile& barcode,vector<int> segments,int maxDistToEnds,int maxMismatch,int tech, const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false){
+  void identifyBarcodesinBlock(vector<Read>& blockreads,BarcodeFile& barcode,vector<int> segments,
+                               int maxDistToEnds,int maxMismatch,int tech,
+                               const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false){
     for(int i=0;i<blockreads.size();++i){
-      blockreads[i].identifyBarcodes(barcode,segments,maxDistToEnds,maxMismatch,tech, model, wl_db, dtw);
+      blockreads[i].identifyBarcodes(barcode,segments,maxDistToEnds,maxMismatch, tech, model, wl_db, dtw);
     }
   }
   
-  void writeReadData(vector<vector<Read>>& readmatrix,std::stringstream &readinfostream, std::stringstream &filteredfastqstream, std::stringstream &trimfilteredfastqstream){
+  void identifyBarcodesinBlockWithAnno(vector<Read>& blockreads,BarcodeFile& barcode,vector<int> segments,
+                                       int maxMismatch,int tech, unordered_map<string, ReadAnno>& annoMap,
+                                       const entry_t *model=nullptr,WL_DB *wl_db=nullptr, bool dtw=false){
+    for(int i=0;i<blockreads.size();++i){
+      blockreads[i].identifyBarcodes(blockreads,barcode,segments,maxMismatch,tech, annoMap, model, wl_db, dtw);
+    }
+  }
+  
+  void writeReadData(vector<vector<Read>>& readmatrix,std::stringstream &readinfostream,
+                     std::stringstream &filteredfastqstream, std::stringstream &trimfilteredfastqstream){
     for(int i=0;i<readmatrix.size();++i){
       for(int j=0;j<readmatrix[i].size();++j){
         readmatrix[i][j].printBarcodeInfo(readinfostream);
@@ -1778,4 +2209,31 @@ public:
     }
   }
 }; //class ReadFile
+
+void readAlignmentSummaryFile(unordered_map<string, ReadAnno>& annoMap, string filename){
+  fprintf(stderr,"Start to read annotation file: %s\n",filename.c_str());
+  fstream align_summary_file;
+  align_summary_file.open(filename,fstream::in);
+  int i=0;
+  while(!align_summary_file.eof()){
+    string line;
+    ReadAnno thisAnno;
+    getline(align_summary_file,line,'\n');
+    i++;
+    if(line==""){
+      continue;
+    }
+    vector<string> fields=tokenize(line,'\t');
+    thisAnno.read_id=fields[0];
+    thisAnno.gene_id=tokenize(fields[1],',');
+    thisAnno.gene_name=tokenize(fields[2],',');
+    thisAnno.read_orientation=string2strands(fields[3]);
+    thisAnno.free_regions=string2regions(fields[4]);
+    thisAnno.qhits=string2regions(fields[5]);
+    thisAnno.hit_overlaps=string2hit_overlaps(fields[9]);
+    thisAnno.occupied_regions=string2regions(fields[10]);
+    annoMap[thisAnno.read_id]=thisAnno;
+  }
+  fprintf(stderr,"Annotation file read.\n");
+}
 
