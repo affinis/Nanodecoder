@@ -32,6 +32,15 @@ using std::setprecision;
 regex gene_regex("(gene_id \"| gene_type \"| gene_biotype \"| gene_name \"|\")");
 regex transcript_regex("( transcript_id \"| transcript_type \"| transcript_name \"|\")");
 
+bool isSpliced(uint32_t* test_cigar, int ncigar){
+  for(int i=0;i<ncigar;i++){
+    if(bam_cigar_opchr(test_cigar[i])=='N'){
+      return(true);
+    }
+  }
+  return(false);
+}
+
 
 /*!
  * @abstract get specific field from aux field of GTF file with key_word, eg: "transcript_id", "transcript_name" etc.
@@ -205,6 +214,7 @@ struct gene_feature{
  * @qcovs                 query coverage of hits.
  * @qhits                 vector of pair<int,int>, indicate mapping start and end position on read, 1-based.
  * @hit_strands           orientation of hits corresponding to ref, "forward" or "reverse".
+ * @is_spliced            is hits spliced.
  * @refs                  chromosome id (in header of genome fasta).
  * @features              gene ids of hits according to GTF file (a read may have multiple alignment to ref), 
  *                        notice that features.size() == qhits.size(), as some of the hits may not overlap with 
@@ -231,6 +241,7 @@ struct mapping_info{
   vector<float> qcovs;
   vector<pair<int, int>> qhits;
   vector<string> hit_strands;
+  vector<bool> is_spliced;
   vector<string> refs;
   vector<string> features;
   vector<float> rcovs;
@@ -253,9 +264,10 @@ struct mapping_info{
     }
     string hits_str=vector_pair_int2str(this->qhits);
     string free_region_str=vector_pair_int2str(this->freeRegion);
+    string is_spliced_str=stringCat(this->is_spliced);
     
-    fprintf(stderr,"%s\t%s\t%s\t%s\t%s\n",this->ID.c_str(),ref_str.c_str(),strand_str.c_str(),\
-            hits_str.c_str(),free_region_str.c_str());
+    fprintf(stderr,"%s\t%s\t%s\t%s\t%s\t%s\n",this->ID.c_str(),ref_str.c_str(),strand_str.c_str(),\
+            hits_str.c_str(),free_region_str.c_str(),is_spliced_str.c_str());
   }//void debugPrintInfo()
   
   void writeAnnotation(ofstream& File){
@@ -266,6 +278,7 @@ struct mapping_info{
     string occupied_region_str=vector_pair_int2str(this->occupiedRegion);
     string rhits_str=vector_pair_int2str(this->rhits);
     string rcov_str=stringCat(this->rcovs);
+    string is_spliced_str=stringCat(this->is_spliced);
     if(this->mergedRegions.empty()){
       merged_hits_str="*";
     }else{
@@ -277,7 +290,7 @@ struct mapping_info{
     File << this->ID << "\t" << this->final_annotation_id << "\t" << this->final_annotation_name << "\t";
     File << this->read_orientation << "\t" << free_region_str << "\t" << qhits_str << "\t" << qcov_str << "\t";
     File << rhits_str << "\t" << rcov_str << "\t" <<  merged_hits_str << "\t";
-    File << occupied_region_str << "\n";
+    File << occupied_region_str << "\t" << is_spliced_str << "\n";
   }
   
   
@@ -748,6 +761,7 @@ void readMappingFile(const char * Bamfilename, unordered_map<string, mapping_inf
     int right_coplen=bam_cigar_oplen(CIGAR[ncigar-1]);
     int qlen=bam_cigar2qlen(ncigar,CIGAR);
     int rlen=bam_cigar2rlen(ncigar,CIGAR);
+    bool splicing_stat=isSpliced(CIGAR,ncigar);
     if(bam_is_rev(b)){
       std::swap(left_coplen,right_coplen);
       std::swap(left_copchr,right_copchr);
@@ -778,6 +792,7 @@ void readMappingFile(const char * Bamfilename, unordered_map<string, mapping_inf
       thismapping.refs.push_back(ref_name);
       pair<int, int> rhit={b->core.pos+1,b->core.pos+rlen};
       thismapping.rhits.push_back(rhit);
+      thismapping.is_spliced.push_back(splicing_stat);
       thismapping.read_length=qlen;
       ReadMapping[bam_get_qname(b)]=thismapping;
       num_read++;
@@ -804,6 +819,7 @@ void readMappingFile(const char * Bamfilename, unordered_map<string, mapping_inf
       ReadMapping[bam_get_qname(b)].refs.push_back(ref_name);
       pair<int, int> rhit={b->core.pos+1,b->core.pos+rlen};
       ReadMapping[bam_get_qname(b)].rhits.push_back(rhit);
+      ReadMapping[bam_get_qname(b)].is_spliced.push_back(splicing_stat);
     }
   }
   bam_destroy1(b);
@@ -811,6 +827,8 @@ void readMappingFile(const char * Bamfilename, unordered_map<string, mapping_inf
   ReadMapping[latest_read].debugPrintInfo();
   fprintf(stderr,"------------------------------------\nAll mappings read, totally %li reads, %li hits\n",num_read, num_hits);
 }
+
+
   
   
   

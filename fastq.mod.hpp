@@ -44,6 +44,9 @@ struct ReadAnno{
   vector<pair<int,int>> qhits;
   vector<vector<int>> hit_overlaps;
   vector<pair<int,int>> occupied_regions;
+  vector<float> qcovs;
+  vector<float> rcovs;
+  vector<int> is_spliced;
   int flag;
 };
 
@@ -136,13 +139,19 @@ public:
   vector<pair<int,int>> freeRegions;
   vector<pair<int,int>> qhits;
   vector<int> qhitOrient;
+  vector<float> qhit_covs;
   vector<vector<int>> hit_overlaps;
   vector<pair<int,int>> occupiedRegions;
   vector<string> hit_names;
   vector<string> hit_ids;
+  vector<float> hit_covs;
+  vector<int> spliced;
   vector<int> R1Aps;
   vector<int> R1Ass;
   vector<int> R1Ams;
+  vector<int> TSOps;
+  vector<int> TSOss;
+  vector<int> TSOms;
   int OUTER=-1;
   int INNER=-1;
   vector<string> Kmers;
@@ -179,6 +188,9 @@ public:
     string R1a_position_str="";
     string R1a_strand_str="";
     vector<string> R1a_strands;
+    string TSO_position_str="";
+    string TSO_strand_str="";
+    vector<string> TSO_strands;
     if(barcode_intolerance_detail.size()==0){
       barcode_intolerance_detail_str="*";
       barcode_intolerance_indices_str="*";
@@ -205,12 +217,28 @@ public:
       R1a_position_str=stringCat(this->R1Aps);
       R1a_strand_str=stringCat(R1a_strands);
     }
+    
+    if(TSOss.empty()){
+      if(INNER==-1){
+        TSO_position_str="-1";
+        TSO_strand_str="*";
+      }else{
+        TSO_position_str=to_string(INNER);
+        TSO_strand_str="*";
+      }
+    }else{
+      for(int j:this->TSOss){
+        TSO_strands.push_back(num2rna[j]);
+      }
+      TSO_position_str=stringCat(this->TSOps);
+      TSO_strand_str=stringCat(TSO_strands);
+    }
     string hit_regions_str=regions2string(this->qhits);
     string hit_strands_str=strands2string(this->qhitOrient);
     cout << ID << "\t" << stat << "\t" << R1a_position_str << "\t" << R1a_strand_str << "\t";
     cout << barcode << "\t" << barcodeStart << "\t" << barcodeStrand << "\t" << barcodeMismatch << "\t";
     cout << barcode_in_tolerance << "\t" << barcode_intolerance_detail_str << "\t" << barcode_intolerance_indices_str << "\t" << barcode_mismatches_str << "\t";
-    cout << hit_regions_str << "\t" << hit_strands_str << "\t" << this->final_annotation << endl;
+    cout << hit_regions_str << "\t" << hit_strands_str << "\t" << TSO_position_str << "\t" << TSO_strand_str << "\t" << this->final_annotation << endl;
   }
   
   void printBarcodeInfo(std::stringstream &stream){
@@ -224,6 +252,9 @@ public:
     string R1a_position_str="";
     string R1a_strand_str="";
     vector<string> R1a_strands;
+    string TSO_position_str="";
+    string TSO_strand_str="";
+    vector<string> TSO_strands;
     if(barcode_intolerance_detail.size()==0){
       barcode_intolerance_detail_str="*";
       barcode_intolerance_indices_str="*";
@@ -250,6 +281,23 @@ public:
       R1a_position_str=stringCat(this->R1Aps);
       R1a_strand_str=stringCat(R1a_strands);
     }
+    
+    if(TSOss.empty()){
+      if(INNER==-1){
+        TSO_position_str="-1";
+        TSO_strand_str="*";
+      }else{
+        TSO_position_str=to_string(INNER);
+        TSO_strand_str="*";
+      }
+    }else{
+      for(int j:this->TSOss){
+        TSO_strands.push_back(num2rna[j]);
+      }
+      TSO_position_str=stringCat(this->TSOps);
+      TSO_strand_str=stringCat(TSO_strands);
+    }
+    
     string hit_regions_str=regions2string(this->qhits);
     string hit_strands_str=strands2string(this->qhitOrient);
     //     1. read_id    2. status          3. R1a_start              4. R1a_strand
@@ -258,8 +306,8 @@ public:
     stream << barcode << "\t" << barcodeStart << "\t" << barcodeStrand << "\t" << barcodeMismatch << "\t";
     //         9. num_of barcodes               10. barcodes                             11. barcode_starts                     12. barcode_mismatches
     stream << barcode_in_tolerance << "\t" << barcode_intolerance_detail_str << "\t" << barcode_intolerance_indices_str << "\t" << barcode_mismatches_str << "\t";
-    //          13. hit regions           14. hit orientations         15. final annotation
-    stream << hit_regions_str << "\t" << hit_strands_str << "\t" << this->final_annotation << endl;
+    //          13. hit regions           14. hit orientations         15. TSO position           16. TSO strand          17. final annotation
+    stream << hit_regions_str << "\t" << hit_strands_str << "\t" << TSO_position_str << "\t" << TSO_strand_str << "\t" << this->final_annotation << endl;
   }
   
   string choose_annotation(string id, string name){
@@ -354,7 +402,7 @@ public:
   void annotate_read_by_valid_hit(vector<int> valid_hit_idx){
     // very little case, all of the hit in occupied region have diff strand with R1a
     if(valid_hit_idx.empty()){
-      this->final_annotation="Odds_strand_conflict";
+      this->final_annotation="Non-transcriptome";
       // ideal case, only one hit have same strand with R1a
     }else if(valid_hit_idx.size()==1){
       if(valid_hit_idx[0]!=-1){
@@ -372,7 +420,31 @@ public:
         }
         this->final_annotation.erase(this->final_annotation.length()-1);
       }else{
-        this->final_annotation="Ambiguous_mapping";
+        int best_align_count=0;
+        float best_align_score=0;
+        int best_align_index=-1;
+        for(int i:valid_hit_idx){
+          float align_score=this->qhit_covs[i]*this->hit_covs[i];
+          if(align_score>0&&align_score>best_align_score){
+            best_align_count=1;
+            best_align_score=align_score;
+            best_align_index=i;
+          }else if(align_score>0&&align_score==best_align_score){
+            best_align_count++;
+          }else{
+            continue;
+          }
+        }
+        if(best_align_count==1){
+          //cout << best_align_index << endl;
+          //cout << best_align_score << endl;
+          this->final_annotation=choose_annotation(this->hit_ids[best_align_index],
+                                                   this->hit_names[best_align_index]);
+        }else if(best_align_count>1){
+          this->final_annotation="Ambiguous_mapping";
+        }else{
+          this->final_annotation="Non-transcriptome";
+        }
       }
     }
   }
@@ -406,10 +478,10 @@ public:
         if(this->qhitOrient[0]==-1){
           this->final_annotation="Non-transcriptome";
         }else{
-          this->final_annotation="Odds_strand_conflict";
+          this->final_annotation="Non-transcriptome";
         }
       }
-    //this condition should not exist in real data as num of hits >=occupied region, but I processed it here.
+    //this condition should not exist in real data as num of hits < occupied region, but I processed it here.
     }else if(this->hit_ids.size()==1&&this->occupiedRegions.size()>1){
       pair<int, int> region_for_R1a=occupiedRegions[find_nearest_region(this->occupiedRegions,this->R1Aps[0]-1,desired_hit_strand)];
       if(isContaining(this->qhits[0],region_for_R1a)){
@@ -419,7 +491,7 @@ public:
           if(this->qhitOrient[0]==-1){
             this->final_annotation="Non-transcriptome";
           }else{
-            this->final_annotation="Odds_strand_conflict";
+            this->final_annotation="Non-transcriptome";
           }
         }
       }else{
@@ -429,16 +501,75 @@ public:
     // often happen, multiple hits to one region, maybe pseudo- or homologous-genes (ambiguous mapping) and fusion genes as well.
     }else if(this->hit_ids.size()>1&&this->occupiedRegions.size()==1){
       vector<int> valid_hit=filter_hit_by_strand(this->qhitOrient,desired_hit_strand);
+      //cout << "debug1.5.1" << endl;
       this->annotate_read_by_valid_hit(valid_hit);
-    
+
     //happen some times
     }else if(this->hit_ids.size()>1&&this->occupiedRegions.size()>1){
+      //cout << "debug1.5.2" << endl;
       vector<int> valid_hit=filter_hit_by_strand_and_region(this->occupiedRegions,this->qhits,this->qhitOrient,this->R1Aps[0],desired_hit_strand);
       this->annotate_read_by_valid_hit(valid_hit);
       
     //else condition may not exist
     }else{
       this->final_annotation="Odds_x";
+    }
+  }
+  
+  bool R1a_homo_orient(){
+    for(int orien:this->R1Ass){
+      if(orien!=this->R1Ass[0]){
+        return false;
+      }
+    }
+    return true;
+  }
+  
+  void add_complex_structure_annotation(){
+    if(this->R1Aps.size()==0||this->R1Aps.size()==1){
+      return;
+    }else if(this->R1Aps.size()==2){
+        if(this->R1Ass[0]==0&&this->R1Ass[1]==0){
+          if(this->R1Aps[1]-this->R1Aps[0]>50){
+            this->final_annotation="Chimera";
+            return;
+          }else{
+            this->final_annotation="R1a_duplication";
+            return;
+          }
+        }else if(this->R1Ass[0]==0&&this->R1Ass[1]==3){
+          if(this->R1Aps[1]-this->R1Aps[0]>100){
+            this->final_annotation="Dual_header";
+            return;
+          }else{
+            this->final_annotation="Others";
+            return;
+          }
+        }else if(this->R1Ass[0]==3&&this->R1Ass[1]==0){
+          if(this->R1Aps[1]-this->R1Aps[0]<100){
+            this->final_annotation="Anti_dual_header";
+            return;
+          }else{
+            this->final_annotation="Others";
+            return;
+          }
+        }else{
+          if(this->R1Aps[1]-this->R1Aps[0]>50){
+            this->final_annotation="Chimera";
+            return;
+          }else{
+            this->final_annotation="R1a_duplication";
+            return;
+          }
+        }
+    }else{
+      if(this->R1a_homo_orient()){
+        this->final_annotation="Chimera";
+        return;
+      }else{
+        this->final_annotation="Others";
+        return;
+      }
     }
   }
   
@@ -568,6 +699,68 @@ public:
   }
   
   /*!
+   @abstract Find certain TSO sequence on read.
+   
+   @param mismatch_max: max mismatch allowed.
+   @param search_start: start position of search range, 1-based.
+   @param search_end: end position of search range, 1-based.
+   @param seq: target sequence for searching read1 adapter.
+   
+   @return null, add TSO data to TSOps (position, 1-based), TSOms (mismatch), TSOss (strand).
+   */
+  void findTSO(int mismatch_max, int search_start, int search_end, int tech){
+    if(tech==3){
+      TENX_TSO="CCCATGTACTCTGCGTTGATACCACTGCTT";
+    }
+    int minDist=TENX_TSO.length();
+    int minDistIndex;
+    int minDistStrand;
+    if(search_end>this->Seq.length()){
+      fprintf(stderr,"findTSO: search_end larger than read length\n");
+      exit(0);
+    }
+    string testseq=this->Seq.substr(search_start-1,search_end-search_start+1);
+    vector<pair<int, int>> res;
+    vector<string> kmers=genrateKmerFromSeq(testseq,TENX_TSO.length());
+    string TENX_TSO_REV=reverse_complement(TENX_TSO);
+    int i=0;
+    for(string kmer:kmers){
+      int strand;
+      int dist=editDistance(TENX_TSO, kmer, mismatch_max);
+      strand=0;
+      if(editDistance(TENX_TSO_REV, kmer, mismatch_max)<dist){
+        dist=editDistance(TENX_TSO_REV, kmer, mismatch_max);
+        strand=3;
+      }
+      if(dist>minDist || dist>mismatch_max){
+        i++;
+        continue;
+      }else{
+        minDist=dist;
+        minDistIndex=i+search_start;
+        minDistStrand=strand;
+        //        cout << minDist << "\t" << minDistIndex << "\t" << minDistStrand << endl;
+        if(this->TSOps.size()==0||minDistIndex-TSOps[TSOps.size()-1]>=TENX_TSO.length()){
+          this->TSOps.push_back(minDistIndex);
+          this->TSOss.push_back(minDistStrand);
+          this->TSOms.push_back(minDist);
+          i++;
+          continue;
+        }else if(minDistIndex-TSOps[TSOps.size()-1]<TENX_TSO.length()){
+          this->TSOps.pop_back();
+          this->TSOss.pop_back();
+          this->TSOms.pop_back();
+          this->TSOps.push_back(minDistIndex);
+          this->TSOss.push_back(minDistStrand);
+          this->TSOms.push_back(minDist);
+          i++;
+          continue;
+        }
+      }
+    }
+  }
+  
+  /*!
    @abstract Find Read1 adapter on sequence.
    
    @param mismatch_max: max mismatch allowed for Read1 adapter.
@@ -642,6 +835,16 @@ public:
     bool R1a_related_occ_region_exist=false;
     int free_region_index=0;
     int occ_region_index=0;
+    if(R1a_orientation==0&&R1a_index!=this->R1Aps.size()-1){
+      if(this->R1Ass[R1a_index+1]==0&&this->R1Aps[R1a_index+1]-R1a_position<=50){
+        return;
+      }
+    }
+    if(R1a_orientation==3&&R1a_index!=0){
+      if(this->R1Ass[R1a_index-1]==3&&R1a_position-this->R1Aps[R1a_index-1]<=50){
+        return;
+      }
+    }
     for(pair<int,int> free_region:this->freeRegions){
       if(isContaining(R1a_position,free_region)){
         R1a_related_region=free_region;
@@ -695,6 +898,9 @@ public:
         split_container.qhitOrient.push_back(this->qhitOrient[i]);
         split_container.hit_ids.push_back(this->hit_ids[i]);
         split_container.hit_names.push_back(this->hit_names[i]);
+        split_container.qhit_covs.push_back(this->qhit_covs[i]);
+        split_container.hit_covs.push_back(this->hit_covs[i]);
+        split_container.spliced.push_back(this->spliced[i]);
       }
     }
     return;
@@ -829,6 +1035,7 @@ public:
     }
     
     if(!annoMap[this->ID].read_id.empty()){
+      //cout << "debug1.1" << endl;
       vector<pair<int,int>> freeRegions=annoMap[this->ID].free_regions;
       this->freeRegions=freeRegions;
       this->qhits=annoMap[this->ID].qhits;
@@ -837,6 +1044,10 @@ public:
       this->occupiedRegions=annoMap[this->ID].occupied_regions;
       this->hit_ids=annoMap[this->ID].gene_id;
       this->hit_names=annoMap[this->ID].gene_name;
+      this->hit_covs=annoMap[this->ID].rcovs;
+      this->qhit_covs=annoMap[this->ID].qcovs;
+      this->spliced=annoMap[this->ID].is_spliced;
+      //cout << "debug1.2" << endl;
     }
 
     if(this->qhits.empty()){
@@ -853,6 +1064,24 @@ public:
         }
       }
     }
+    
+    //cout << "debug1.3" << endl;
+    if(this->TSOps.empty()){
+      int max_tso_mismatch=maxMismatch;
+      if(tech==3){
+        max_tso_mismatch=max_tso_mismatch*3;
+        TENX_TSO="CCCATGTACTCTGCGTTGATACCACTGCTT";
+      }
+      for(pair<int,int> region:freeRegions){
+        if(region.second-region.first+1<TENX_TSO.length()){
+          continue;
+        }else{
+          this->findTSO(max_tso_mismatch,region.first,region.second,tech);
+        }
+      }
+    }
+    
+    //cout << "debug1.4" << endl;
     if(this->R1Aps.empty()){
       if(dtw){
         this->identifybarcodesDTW(wl_db,model);
@@ -878,6 +1107,8 @@ public:
           findmismatchingbarcodebykmer(barcodes,segments,kmer.second,kmer.first+1,"reverse",maxMismatch);
         }
       }
+      
+      //cout << "debug1.5" << endl;
       //if multiple barcode found, get the barcode with min mismatch
       if(this->barcode_mismatches.size()>1){
         int minPosition=min_element(this->barcode_mismatches.begin(),this->barcode_mismatches.end()) - this->barcode_mismatches.begin();
@@ -897,11 +1128,15 @@ public:
         this->add_flag('M');
       }
     }else{
+      //cout << "debug1.6" << endl;
       this->add_flag('C');
+      this->add_complex_structure_annotation();
       for(int i=0;i<this->R1Aps.size();++i){
         Read split_read;
         split_read.ID=this->ID+"-"+to_string(i);
+        //cout << "debug1.7" << endl;
         find_complete_region_by_R1a(split_read,this->R1Aps[i],this->R1Ass[i],i);
+        //cout << "debug1.8" << endl;
         if(!split_read.Seq.empty()){
           parent_block.push_back(split_read);
           continue;
@@ -2069,6 +2304,7 @@ public:
   ReadFile(const char* filename, BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds,
            int maxMismatch, int tech, int threadnum, unordered_map<string, ReadAnno>& annoMap, 
            const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false,bool debug=false){
+    fprintf(stderr,"Start BC identification and read annotation\n");
     string output_filename="filtered.fastq.gz";
     string trimmed_output_filename="trimmed_filtered.fastq.gz";
     gzFile outFile=gzopen(output_filename.c_str(), "wb2");
@@ -2090,18 +2326,32 @@ public:
         tmpRead.Seq=seq->seq.s;
         tmpRead.Quality=seq->qual.s;
         if(debug){
-          fprintf(stderr,"%s\n",tmpRead.ID.c_str());
-          //tmpRead.identifyBarcodes(barcodes,segments,maxDistToEnds,maxMismatch, tech, model, wl_db, dtw);
-          //tmpRead.identifyBarcodes(barcodes,segments,maxMismatch,tech, annoMap, model, wl_db, dtw);
-          //tmpRead.printBarcodeInfo();
+          //cout << tmpRead.ID << endl;
+          vector<Read> debug_chimeras;
+          //cout << "debug1" << endl;
+          tmpRead.identifyBarcodes(debug_chimeras,barcodes,segments,maxMismatch,tech, annoMap, model, wl_db, dtw);
+          //cout << "debug2" << endl;
+          tmpRead.printBarcodeInfo();
+          //cout << "debug3" << endl;
+          if(!debug_chimeras.empty()){
+            //cout << "debug4" << endl;
+            for(Read read:debug_chimeras){
+              read.identifyBarcodes(debug_chimeras,barcodes,segments,maxMismatch,tech, annoMap, model, wl_db, dtw);
+              read.printBarcodeInfo();
+            }
+          }
           continue;
         }
         Reads.push_back(tmpRead);
-        if(Reads.size()==100){
+        //cout << tmpRead.ID << endl;
+        if(Reads.size()==50){
+          //cout << "block full" << endl;
           Readmatrix.push_back(Reads);
+          //cout << "number of block: " << Readmatrix.size() << endl;
           threadcount++;
           Reads.clear();
           if(Readmatrix.size()==threadnum){
+            //cout << "Batch start" << endl;
             #pragma omp parallel for
             for(int i=0;i<Readmatrix.size();++i){
               BarcodeFile threadbarcode=barcodes;
@@ -2115,7 +2365,7 @@ public:
                 identifyBarcodesinBlockWithAnno(Readmatrix[i],threadbarcode,threadsegments,threadmaxMismatch,threadtech,annoMap, model, wl_db, dtw);
               }
             } //for(int i=0;i<threadnum;++i)
-            
+            //cout << "Batch end" << endl;
             writeReadData(Readmatrix,streambarcodeinfo,streamFQ,streamFQ_trim);
             threadcount=0;
             Readmatrix.clear();
@@ -2230,6 +2480,9 @@ void readAlignmentSummaryFile(unordered_map<string, ReadAnno>& annoMap, string f
     thisAnno.read_orientation=string2strands(fields[3]);
     thisAnno.free_regions=string2regions(fields[4]);
     thisAnno.qhits=string2regions(fields[5]);
+    thisAnno.qcovs=string2covs(fields[6]);
+    thisAnno.rcovs=string2covs(fields[8]);
+    thisAnno.is_spliced=string2splice(fields[11]);
     thisAnno.hit_overlaps=string2hit_overlaps(fields[9]);
     thisAnno.occupied_regions=string2regions(fields[10]);
     annoMap[thisAnno.read_id]=thisAnno;

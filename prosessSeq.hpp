@@ -401,7 +401,16 @@ string stringCat(vector<int>& vec){
   }
   res.erase(res.end()-1);
   return(res);
-} 
+}
+
+string stringCat(vector<bool>& vec){
+  string res="";
+  for(bool boo:vec){
+    res=res+to_string(boo)+",";
+  }
+  res.erase(res.end()-1);
+  return(res);
+}
 
 vector<pair<int,int>> string2regions(string& str){
   vector<pair<int,int>> res;
@@ -460,6 +469,30 @@ vector<int> string2strands(string& str){
       continue;
     }
     res.push_back(strand2num[strand_str]);
+  }
+  return(res);
+}
+
+vector<float> string2covs(string& str){
+  vector<float> res;
+  vector<string> fields=tokenize(str,',');
+  for(string cov_str:fields){
+    if(cov_str==""){
+      continue;
+    }
+    res.push_back(stof(cov_str));
+  }
+  return(res);
+}
+
+vector<int> string2splice(string& str){
+  vector<int> res;
+  vector<string> fields=tokenize(str,',');
+  for(string splice_str:fields){
+    if(splice_str==""){
+      continue;
+    }
+    res.push_back(stoi(splice_str));
   }
   return(res);
 }
