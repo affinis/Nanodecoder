@@ -28,6 +28,7 @@ using std::regex;
 using std::smatch;
 using std::regex_search;
 using std::thread;
+using std::ios;
 
 KSEQ_INIT(gzFile, gzread)
 
@@ -1921,371 +1922,6 @@ public:
     kseq_destroy(seq);
     gzclose(File);
   };
-  
-  //constructor removing chimera by identifying multiple polyT/A
-  ReadFile(const char* filename, const char* read_summary_filename, int tech){
-    fstream mapping_stat;
-    fstream read_summary;
-    fstream read_split_report;
-    gzFile RawReadFile=gzopen("chimeric_raw_split_fastq.gz", "wb2");
-    ReadCount=0;
-    unordered_map<string,pair<int, string>> read2barcodeStar_strand;
-    cout << "loading chimera read summary..." << endl;
-    read_summary.open(read_summary_filename,fstream::in);
-    //    int line_counter=0;
-    while(!read_summary.eof()){
-      string record;
-      vector<string> fields;
-      string read_id;
-      pair<int, string> barcodeStar_strand;
-      getline(read_summary,record,'\n');
-      if(record==""){
-        continue;
-      }
-      fields=tokenize(record,'\t');
-      read_id=fields[0];
-      barcodeStar_strand.first=stoi(fields[4]);
-      barcodeStar_strand.second=fields[6];
-      read2barcodeStar_strand[read_id]=barcodeStar_strand;
-    }
-    read_summary.close();
-    cout << "start read processing" << endl;
-    read_split_report.open("read_split_report.tsv",fstream::in|fstream::out|fstream::app);
-    File=gzopen(filename, "r");
-    seq = kseq_init(File);
-    while (kseq_read(seq) >= 0){
-      ReadCount++;
-      Read tmpRead;
-      int split_position;
-      int read_length;
-      tmpRead.ID=seq->name.s;
-      tmpRead.ID=tokenize(tmpRead.ID,'_')[0];
-      tmpRead.Seq=seq->seq.s;
-      tmpRead.Quality=seq->qual.s;
-      tmpRead.barcodeStrand=read2barcodeStar_strand[tmpRead.ID].second;
-      tmpRead.barcodeStart=read2barcodeStar_strand[tmpRead.ID].first;
-      read_length=tmpRead.Seq.length();
-      if(read_length<=200){
-        read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "read_too_short" << endl;
-        fq_gz_write(RawReadFile,tmpRead);
-        continue;
-      }
-      if(tmpRead.barcodeStrand=="forward"){
-          Read splitRead1;
-          Read splitRead2;
-          int first_read_length;
-          if(tech==5){
-            vector<string> polyAs;
-            regex regexp("A{10,10}[^A]");
-            smatch polyAs_match;
-            string testseq=tmpRead.Seq;
-            while(regex_search(testseq, polyAs_match, regexp)){
-              //              cout << polyTs[0] << endl;
-              polyAs.push_back(polyAs_match[0]);
-              testseq=polyAs_match.suffix().str();
-            }
-            if(polyAs.empty()){
-              read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
-              fq_gz_write(RawReadFile,tmpRead);
-              continue;
-            }else{
-              int polyAIndex;
-              polyAIndex=tmpRead.Seq.find(polyAs[0]);
-//              cout << polyAs[0] << endl;
-//              cout << polyAIndex << endl;
-              if(polyAIndex+10>read_length-200){
-                read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
-                fq_gz_write(RawReadFile,tmpRead);
-                continue;
-              }else{
-                first_read_length=polyAIndex+10;
-              }
-            }//if(polyAs.empty())
-          }else if(tech==3){
-            vector<string> polyTs;
-            regex regexp("[^T]T{10,10}");
-            smatch polyTs_match;
-            string testseq=tmpRead.Seq;
-            while(regex_search(testseq, polyTs_match, regexp)){
-              //              cout << polyTs[0] << endl;
-              polyTs.push_back(polyTs_match[0]);
-              testseq=polyTs_match.suffix().str();
-            }
-            if(polyTs.empty()){
-              read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
-              fq_gz_write(RawReadFile,tmpRead);
-              continue;
-            }else if(polyTs.size()==1){
-              int polyTIndex;
-              polyTIndex=tmpRead.Seq.find(polyTs[0]);
-              if(polyTIndex+1<=70){
-                read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
-                fq_gz_write(RawReadFile,tmpRead);
-                continue;
-              }else{
-                first_read_length=polyTIndex+1-70;
-              }
-            }else{
-              int polyTIndex;
-              if(polyTs[0]==polyTs[1]){
-                polyTIndex=tmpRead.Seq.find(polyTs[0],tmpRead.Seq.find(polyTs[0])+1);
-              }else{
-                polyTIndex=tmpRead.Seq.find(polyTs[1]);
-              }
-              first_read_length=polyTIndex+1-70;
-            }
-          }else{
-            cout << "Invalid tech while splitting reads" << endl;
-            exit(0);
-          }
-          splitRead1.ID=tmpRead.ID + "-1";
-          splitRead1.Seq=tmpRead.Seq.substr(0,first_read_length);
-          splitRead1.Quality=tmpRead.Quality.substr(0,first_read_length);
-          splitRead2.ID=tmpRead.ID + "-2";
-          splitRead2.Seq=tmpRead.Seq.substr(first_read_length,read_length-first_read_length);
-          splitRead2.Quality=tmpRead.Quality.substr(first_read_length,read_length-first_read_length);
-          read_split_report << tmpRead.ID << "\t" << splitRead1.ID+",-2" << "\t" << tmpRead.barcodeStart << "\t" << first_read_length << "\t" << "splited" << endl;
-          fq_gz_write(RawReadFile,splitRead1);
-          fq_gz_write(RawReadFile,splitRead2);
-          Reads.push_back(splitRead1);
-          Reads.push_back(splitRead2);
-      }else{
-        //reverse complement read
-          Read splitRead1;
-          Read splitRead2;
-          int first_read_length;
-          if(tech==5){
-            vector<string> polyTs;
-            regex regexp("[^T]T{10,10}");
-            smatch polyTs_match;
-            string testseq=tmpRead.Seq;
-            while(regex_search(testseq, polyTs_match, regexp)){
-//              cout << polyTs[0] << endl;
-              polyTs.push_back(polyTs_match[0]);
-              testseq=polyTs_match.suffix().str();
-            }
-            if(polyTs.empty()){
-//              cout << "no polyT found" << endl;
-              read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
-              fq_gz_write(RawReadFile,tmpRead);
-              continue;
-            }else{
-              int polyTIndex;
-              int sameTail=0;
-              for(int i=0;i<polyTs.size()-1;i++){
-                if(polyTs[i]==polyTs[polyTs.size()-1]){
-                  sameTail++;
-                }
-              }
-//              cout << sameTail << endl;
-              if(sameTail==0){
-//                cout << "unique tail" << endl;
-                polyTIndex=tmpRead.Seq.find(polyTs[polyTs.size()-1]);
-              }else{
- //               cout << "iterating tails" << endl;
-                polyTIndex=-1;
-                for(int j=0;j<=sameTail;j++){
-                  polyTIndex=tmpRead.Seq.find(polyTs[polyTs.size()-1],polyTIndex+1);
-                }
-              }
-              if(polyTIndex+1<200){
-//                cout << "polyT too close to left end" << endl;
-                read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
-                fq_gz_write(RawReadFile,tmpRead);
-                continue;
-              }else{
-                first_read_length=read_length-(polyTIndex+1);
-              }
-            }
-          }else if(tech==3){
-            vector<string> polyAs;
-            regex regexp("A{10,10}[^A]");
-            smatch polyAs_match;
-            string testseq=tmpRead.Seq;
-            while(regex_search(testseq, polyAs_match, regexp)){
-              //              cout << polyTs[0] << endl;
-              polyAs.push_back(polyAs_match[0]);
-              testseq=polyAs_match.suffix().str();
-            }
-            if(polyAs.empty()){
-              read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
-              fq_gz_write(RawReadFile,tmpRead);
-              continue;
-            }else if(polyAs.size()==1){
-              int polyAIndex;
-              polyAIndex=tmpRead.Seq.find(polyAs[0]);
-              if(polyAIndex+10>read_length-70){
-                read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << -1 << "\t" << "fusion_gene_like" << endl;
-                fq_gz_write(RawReadFile,tmpRead);
-                continue;
-              }else{
-                first_read_length=read_length-(polyAIndex+10+70);
-              }
-            }else{
-              int polyAIndex;
-              polyAIndex=tmpRead.Seq.find(polyAs[polyAs.size()-2]);
-              first_read_length=read_length-(polyAIndex+10+70);
-            }
-          }else{
-            cout << "Invalid tech while splitting reads" << endl;
-            exit(0);
-          }
-          splitRead1.ID=tmpRead.ID+"-1";
-          splitRead1.Seq=tmpRead.Seq.substr(read_length-first_read_length,first_read_length);
-          splitRead1.Quality=tmpRead.Quality.substr(read_length-first_read_length,first_read_length);
-          splitRead2.ID=tmpRead.ID+"-2";
-          splitRead2.Seq=tmpRead.Seq.substr(0,read_length-first_read_length);
-          splitRead2.Quality=tmpRead.Quality.substr(0,read_length-first_read_length);
-          read_split_report << tmpRead.ID << "\t" << splitRead1.ID+",-2" << "\t" << tmpRead.barcodeStart << "\t" << read_length-first_read_length << "\t" << "splited" << endl;
-          fq_gz_write(RawReadFile,splitRead1);
-          fq_gz_write(RawReadFile,splitRead2);
-          Reads.push_back(splitRead1);
-          Reads.push_back(splitRead2);
-        }
-    }
-    kseq_destroy(seq);
-    gzclose(File);
-    gzclose(RawReadFile);
-    read_split_report.close();
-  };
-  
-  
-  //constructor aiming at processing chimera reads with mapping stat
-  ReadFile(const char* filename, const char* mapping_stat_filename, const char* read_summary_filename){
-    fstream mapping_stat;
-    fstream read_summary;
-    fstream read_split_report;
-    ReadCount=0;
-    unordered_map<string,vector<int>> read2clippos;
-    unordered_map<string,pair<int, string>> read2barcodeStar_strand;
-    cout << "loading chimera mapping stat..." << endl;
-    mapping_stat.open(mapping_stat_filename,fstream::in);
-    while(!mapping_stat.eof()){
-      string line;
-      string read_id;
-      vector<int> clippos;
-      vector<string> fields;
-      getline(mapping_stat,line,'\n');
-      if(line==""){
-        continue;
-      }
-      fields=tokenize(line,'\t');
-      read_id=tokenize(fields[0],'_')[0];
-      if(stoi(fields[1])==-1){
-        clippos.push_back(0);
-      }else{
-        clippos.push_back(stoi(fields[1]));
-      }
-      if(stoi(fields[3])==-1){
-        clippos.push_back(0);
-      }else{
-        clippos.push_back(stoi(fields[3]));
-      }
-      if(stoi(fields[4])==-1){
-        clippos.push_back(0);
-      }else{
-        clippos.push_back(stoi(fields[4]));
-      }
-      if(stoi(fields[6])==-1){
-        clippos.push_back(0);
-      }else{
-        clippos.push_back(stoi(fields[6]));
-      }
-      read2clippos[read_id]=clippos;
-    }
-    mapping_stat.close();
-    cout << "loading chimera read summary..." << endl;
-    read_summary.open(read_summary_filename,fstream::in);
-//    int line_counter=0;
-    while(!read_summary.eof()){
-      string record;
-      vector<string> fields;
-      string read_id;
-      pair<int, string> barcodeStar_strand;
-      getline(read_summary,record,'\n');
-      if(record==""){
-        continue;
-      }
-      fields=tokenize(record,'\t');
-      read_id=fields[0];
-      barcodeStar_strand.first=stoi(fields[4]);
-      barcodeStar_strand.second=fields[6];
-      read2barcodeStar_strand[read_id]=barcodeStar_strand;
-    }
-    read_summary.close();
-    cout << "start read processing" << endl;
-    read_split_report.open("read_split_report.tsv",fstream::in|fstream::out|fstream::app);
-    File=gzopen(filename, "r");
-    seq = kseq_init(File);
-    while (kseq_read(seq) >= 0){
-      ReadCount++;
-      Read tmpRead;
-      int mapping_start;
-      int split_position;
-      int read_length;
-      tmpRead.ID=seq->name.s;
-      tmpRead.ID=tokenize(tmpRead.ID,'_')[0];
-      tmpRead.Seq=seq->seq.s;
-      tmpRead.Quality=seq->qual.s;
-      tmpRead.barcodeStrand=read2barcodeStar_strand[tmpRead.ID].second;
-      tmpRead.barcodeStart=read2barcodeStar_strand[tmpRead.ID].first;
-      read_length=tmpRead.Seq.length();
-      if(tmpRead.barcodeStrand=="forward"){
-        mapping_start=min(read2clippos[tmpRead.ID][0],read2clippos[tmpRead.ID][2]);
-        if(mapping_start-tmpRead.barcodeStart>=200){
-          read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << mapping_start << "\t" << -1 << "\t" << "complex_fusion" << endl;
-          continue;
-        }else{
-          Read splitRead1;
-          Read splitRead2;
-          int second_read_length;
-          if(mapping_start==read2clippos[tmpRead.ID][0]){
-            second_read_length=read2clippos[tmpRead.ID][1];
-          }else{
-            second_read_length=read2clippos[tmpRead.ID][3];
-          }
-          split_position=tmpRead.Seq.length()-second_read_length;
-          splitRead1.ID=tmpRead.ID+"-1";
-          splitRead1.Seq=tmpRead.Seq.substr(0,split_position);
-          splitRead1.Quality=tmpRead.Quality.substr(0,split_position);
-          splitRead2.ID=tmpRead.ID+"-2";
-          splitRead2.Seq=tmpRead.Seq.substr(split_position,second_read_length);
-          splitRead2.Quality=tmpRead.Quality.substr(split_position,second_read_length);
-          read_split_report << tmpRead.ID << "\t" << splitRead1.ID+",-2" << "\t" << tmpRead.barcodeStart << "\t" << mapping_start << "\t" << split_position << "\t" << "splited" << endl;
-          Reads.push_back(splitRead1);
-          Reads.push_back(splitRead2);
-        }
-      }else{
-        mapping_start=tmpRead.Seq.length()-min(read2clippos[tmpRead.ID][1],read2clippos[tmpRead.ID][3])-1;
-        if(tmpRead.barcodeStart-mapping_start>=200){
-          read_split_report << tmpRead.ID << "\t" << tmpRead.ID << "\t" << tmpRead.barcodeStart << "\t" << mapping_start << "\t" << -1 << "\t" << "complex_fusion" << endl;
-          continue;
-        }else{
-          Read splitRead1;
-          Read splitRead2;
-          int second_read_length;
-          if(mapping_start==(tmpRead.Seq.length()-read2clippos[tmpRead.ID][1])-1){
-            second_read_length=read2clippos[tmpRead.ID][0];
-          }else{
-            second_read_length=read2clippos[tmpRead.ID][2];
-          }
-          split_position=second_read_length;
-          splitRead1.ID=tmpRead.ID+"-1";
-          splitRead1.Seq=tmpRead.Seq.substr(0,second_read_length);
-          splitRead1.Quality=tmpRead.Quality.substr(0,second_read_length);
-          splitRead2.ID=tmpRead.ID+"-2";
-          splitRead2.Seq=tmpRead.Seq.substr(second_read_length,tmpRead.Seq.length()-second_read_length);
-          splitRead2.Quality=tmpRead.Quality.substr(second_read_length,tmpRead.Seq.length()-second_read_length);
-          read_split_report << tmpRead.ID << "\t" << splitRead1.ID+",-2" << "\t" << tmpRead.barcodeStart << "\t" << mapping_start << "\t" << split_position << "\t" << "splited" << endl;
-          Reads.push_back(splitRead1);
-          Reads.push_back(splitRead2);
-        }
-      }
-    }
-    kseq_destroy(seq);
-    gzclose(File);
-    read_split_report.close();
-  };
  
   //function used in ReadFile(const char* filename, const char* read_summary_filename, int tech)
   void fq_gz_write(gzFile out_file, Read& read) {
@@ -2302,18 +1938,21 @@ public:
   //active constructor
   //constructor generate output while reading reads
   ReadFile(const char* filename, BarcodeFile& barcodes, vector<int> segments, int maxDistToEnds,
-           int maxMismatch, int tech, int threadnum, unordered_map<string, ReadAnno>& annoMap, 
-           const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false,bool debug=false){
+           int maxMismatch, int tech, int threadnum, unordered_map<string, ReadAnno>& annoMap, fstream& previous_file,
+           const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false,bool debug=false,string latest_read=""){
+    bool append=true;
+    bool restart=false;
+    if(!latest_read.empty()){
+      restart=true;
+      append=false;
+    }
     fprintf(stderr,"Start BC identification and read annotation\n");
     string output_filename="filtered.fastq.gz";
-    string trimmed_output_filename="trimmed_filtered.fastq.gz";
-    gzFile outFile=gzopen(output_filename.c_str(), "wb2");
-    gzFile trimmed_outFile=gzopen(trimmed_output_filename.c_str(), "wb2");
+    gzFile outFile=gzopen(output_filename.c_str(), "ab2");
     ReadCount=0;
     vector<Read> Reads;
     vector<vector<Read>> Readmatrix;
     std::stringstream streamFQ;
-    std::stringstream streamFQ_trim;
     std::stringstream streambarcodeinfo;
     int barcode_length=barcodes.barcodes[0].length();
     File=gzopen(filename, "r");
@@ -2325,6 +1964,15 @@ public:
         tmpRead.ID=seq->name.s;
         tmpRead.Seq=seq->seq.s;
         tmpRead.Quality=seq->qual.s;
+        if(!latest_read.empty()){
+          if(tmpRead.ID!=latest_read){
+            continue;
+          }else{
+            append=true;
+            latest_read.clear();
+            continue;
+          }
+        }
         if(debug){
           //cout << tmpRead.ID << endl;
           vector<Read> debug_chimeras;
@@ -2366,15 +2014,17 @@ public:
               }
             } //for(int i=0;i<threadnum;++i)
             //cout << "Batch end" << endl;
-            writeReadData(Readmatrix,streambarcodeinfo,streamFQ,streamFQ_trim);
+            writeReadData(Readmatrix,streambarcodeinfo,streamFQ);
             threadcount=0;
             Readmatrix.clear();
-            cout << streambarcodeinfo.str().c_str() << endl;
+            if(append&&restart){
+              previous_file << streambarcodeinfo.str().c_str() << endl;
+            }else{
+              cout << streambarcodeinfo.str().c_str() << endl;
+            }
             gzputs(outFile,streamFQ.str().c_str());
-            gzputs(trimmed_outFile,streamFQ_trim.str().c_str());
             streambarcodeinfo.str("");
             streamFQ.str("");
-            streamFQ_trim.str("");
           }
         }else{
           continue;
@@ -2397,18 +2047,21 @@ public:
           }
         } //for(int i=0;i<Readmatrix.size();++i)
 
-        writeReadData(Readmatrix,streambarcodeinfo,streamFQ,streamFQ_trim);
+        writeReadData(Readmatrix,streambarcodeinfo,streamFQ);
         threadcount=0;
         Readmatrix.clear();
-        cout << streambarcodeinfo.str().c_str() << endl;
+        if(append&&restart){
+          previous_file << streambarcodeinfo.str().c_str() << endl;
+        }else{
+          cout << streambarcodeinfo.str().c_str() << endl;
+        }
         gzputs(outFile,streamFQ.str().c_str());
-        gzputs(trimmed_outFile,streamFQ_trim.str().c_str());
         streambarcodeinfo.str("");
         streamFQ.str("");
-        streamFQ_trim.str("");
         break;
       } //if(kseq_read(seq)>=0)else{}
     } //while(true)
+    gzclose(outFile);
   };
 
   
@@ -2424,7 +2077,6 @@ public:
       const int len=Reads[i].Seq.length();
       for(int j=0;j+k<=len;j++){
         string kmer=Reads[i].Seq.substr(j,k);
-//        cout << kmer << endl;
         Reads[i].Kmers.push_back(kmer);
       }
     }
@@ -2454,6 +2106,18 @@ public:
         if(readmatrix[i][j].barcode!="*"){
           readmatrix[i][j].fq_gz_write(filteredfastqstream,false);
           readmatrix[i][j].fq_gz_write(trimfilteredfastqstream,true);
+        }
+      }
+    }
+  }
+  
+  void writeReadData(vector<vector<Read>>& readmatrix,std::stringstream &readinfostream,
+                     std::stringstream &filteredfastqstream){
+    for(int i=0;i<readmatrix.size();++i){
+      for(int j=0;j<readmatrix[i].size();++j){
+        readmatrix[i][j].printBarcodeInfo(readinfostream);
+        if(readmatrix[i][j].barcode!="*"){
+          readmatrix[i][j].fq_gz_write(filteredfastqstream,false);
         }
       }
     }

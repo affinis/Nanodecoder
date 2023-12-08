@@ -9,6 +9,8 @@ int main(int argc, char *argv[]){
   const char* Barcoedefilename;
   const char* Modelfilename;
   const char* Alignmentsummaryfilename;
+  const char* previousFile=nullptr;
+  string latest_read;
   int MaxMismatch=1;
   int MaxTSOMismatch=2;
   int MinR1Overlap=10;
@@ -19,7 +21,8 @@ int main(int argc, char *argv[]){
   int threads=1;
   bool use_dtw=false;
   bool use_anno=false;
-  while((option=getopt(argc,argv,"hf:b:m:a:r:l:t:d:@:"))!=-1){
+  bool restart=false;
+  while((option=getopt(argc,argv,"hf:b:m:a:r:l:t:d:c:@:"))!=-1){
     switch(option){
     case 'h':
       printf("nanodecoder, identify barcode in long reads, Lin Lyu, 2023\n\n\
@@ -29,9 +32,9 @@ int main(int argc, char *argv[]){
               \t-m\tmismatch allowed\n\
               \t-a\talignmrnt summary file\n\
               \t-r\tBC search range\n\
-              \t-l\tBC length\n\
               \t-t\ttech used 5' or 3'\n\
               \t-d\tusing DTW to rescue reads\n\
+              \t-c\tcontinue from a broken run, give the filename.tsv produced before\n\
               \t-@\tthreads used\n\n");
       return 0;
     case 'f':
@@ -51,9 +54,6 @@ int main(int argc, char *argv[]){
     case 'r':
       barcodeRange=atoi(optarg);
       break;
-    case 'l':
-      BarcodeLength=atoi(optarg);
-      break;
     case 't':
       tech=atoi(optarg);
       break;
@@ -61,6 +61,10 @@ int main(int argc, char *argv[]){
       fprintf(stderr,"Using DTW as supplementary method, this will be much slower.\n");
       use_dtw=true;
       Modelfilename=optarg;
+      break;
+    case 'c':
+      restart=true;
+      previousFile=optarg;
       break;
     case '@':
       threads=atoi(optarg);
@@ -84,6 +88,36 @@ int main(int argc, char *argv[]){
   //load whitelist for classical alignment based method
   BarcodeFile barcodeFile(Barcoedefilename,SegmentsLengths,BarcodeLength);
   unordered_map<string, ReadAnno> AnnoMap;
+  fstream oldfile;
+  fstream appendfile;
+  if(restart){
+    fprintf(stderr,"Restarting from previous run.\n");
+    string lastline;
+    oldfile.open(previousFile);
+    while(!oldfile.eof()){
+      string line;
+      string this_read;
+      getline(oldfile,line,'\n');
+      if(line==""){
+        continue;
+      }else{
+        this_read=tokenize(line,'\t')[0];
+        if(latest_read==""){
+          latest_read=this_read;
+          continue;
+        }else{
+          if(this_read[this_read.length()-2]=='-'){
+            continue;
+          }else{
+            latest_read=this_read;
+          }
+        }
+      }
+    }
+    fprintf(stderr,"Last read of previous run is: %s\n",latest_read.c_str());
+    oldfile.close();
+    appendfile.open(previousFile,ios::app);
+  }
   if(use_dtw){
     //load whitelist and current model for DTW based method
     model=read_pore_model(Modelfilename, mean_to_subtract);
@@ -91,15 +125,19 @@ int main(int argc, char *argv[]){
     if(use_anno){
       readAlignmentSummaryFile(AnnoMap,Alignmentsummaryfilename);
     }
-    ReadFile InputFile(Readfilename,barcodeFile,SegmentsLengths,barcodeRange,MaxMismatch,tech,threads,AnnoMap,model,wl_db,use_dtw);
+    ReadFile InputFile(Readfilename,barcodeFile,SegmentsLengths,barcodeRange,MaxMismatch,
+                       tech,threads,AnnoMap,appendfile,model,wl_db,use_dtw,false,latest_read);
   }else{
     if(use_anno){
       readAlignmentSummaryFile(AnnoMap,Alignmentsummaryfilename);
     }
-    ReadFile InputFile(Readfilename,barcodeFile,SegmentsLengths,barcodeRange,MaxMismatch,tech,threads,AnnoMap,nullptr,nullptr,use_dtw);
+    ReadFile InputFile(Readfilename,barcodeFile,SegmentsLengths,barcodeRange,MaxMismatch,
+                       tech,threads,AnnoMap,appendfile,nullptr,nullptr,use_dtw,false,latest_read);
     
   }
-
+  if(restart){
+    appendfile.close();
+  }
   delete [] wl_db;
   wl_db=nullptr;
   delete [] model;

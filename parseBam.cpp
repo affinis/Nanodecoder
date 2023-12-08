@@ -24,6 +24,9 @@ int main(int argc, char *argv[]){
   unordered_map<string, map<int,pair<int,string>>> sorted_gene_features;
   
   readFeaturesFromGTF(GTFfilename,gene_features);
+  for(auto feature:gene_features){
+    feature.second.debugPrintInfo(true);
+  }
   sortFeaturesByCoord(gene_features,sorted_gene_features);
   readMappingFile(Bamfilename,ReadMapping,sorted_gene_features,gene_features,false,File);
   

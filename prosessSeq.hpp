@@ -376,37 +376,37 @@ vector<int> seq2CurrentLevels(string& seq, std::unordered_map<string, int>& curr
   return(current_levels);
 }
 
-string stringCat(vector<string>& vec){
+string stringCat(vector<string>& vec,char sep=','){
   string res="";
   for(string str:vec){
-    res=res+str+",";
+    res=res+str+sep;
   }
   res.erase(res.end()-1);
   return(res);
 }
 
-string stringCat(vector<float>& vec){
+string stringCat(vector<float>& vec,char sep=','){
   string res="";
   for(float flo:vec){
-    res=res+to_string(flo)+",";
+    res=res+to_string(flo)+sep;
   }
   res.erase(res.end()-1);
   return(res);
 }
   
-string stringCat(vector<int>& vec){
+string stringCat(vector<int>& vec,char sep=','){
   string res="";
   for(int integer:vec){
-    res=res + to_string(integer) +",";
+    res=res + to_string(integer) + sep;
   }
   res.erase(res.end()-1);
   return(res);
 }
 
-string stringCat(vector<bool>& vec){
+string stringCat(vector<bool>& vec, char sep=','){
   string res="";
   for(bool boo:vec){
-    res=res+to_string(boo)+",";
+    res=res+to_string(boo)+sep;
   }
   res.erase(res.end()-1);
   return(res);
@@ -447,14 +447,15 @@ vector<vector<int>> string2hit_overlaps(string& str){
   return(res);
 }
 
-string regions2string(vector<pair<int,int>>& regions){
+string regions2string(vector<pair<int,int>>& regions,char sep=';'){
   if(regions.empty()){
     return("*");
   }
   string res="";
   for(pair<int,int> region:regions){
-    res=res+to_string(region.first)+"-"+to_string(region.second)+";";
+    res=res+to_string(region.first)+"-"+to_string(region.second)+sep;
   }
+  res.erase(res.end()-1);
   return(res);
 }
 
@@ -546,4 +547,20 @@ int pair_length(pair<int,int>& pair_in){
     return(pair_in.first-pair_in.second+1);
   }
   return(pair_in.second-pair_in.first+1);
+}
+
+bool exon_is_same(std::vector<int> &first, std::vector<int> &second){
+  if (first.size()!=second.size()) {
+    return false;
+  }
+  return std::is_permutation(first.begin(), first.end(), second.begin());
+}
+
+bool exon_is_contained(std::vector<int> first, std::vector<int> second){
+  // Sort first vector
+  std::sort(first.begin(), first.end());
+  // Sort second vector
+  std::sort(second.begin(), second.end());
+  // Check if  all elements of a second vector exists in first vector
+  return std::includes(first.begin(), first.end(), second.begin(), second.end());
 }
