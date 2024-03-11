@@ -415,9 +415,13 @@ string stringCat(vector<bool>& vec, char sep=','){
 vector<pair<int,int>> string2regions(string& str){
   vector<pair<int,int>> res;
   vector<string> regions=tokenize(str,';');
+  int i=0;
   for(string region:regions){
     if(region==""){
       continue;
+    }else if(region=="-1--1"){
+      pair<int,int> region_int={0,0};
+      res.push_back(region_int);
     }else{
       pair<int,int> region_int;
       region_int.first=stoi(tokenize(region,'-')[0]);
@@ -479,6 +483,9 @@ vector<float> string2covs(string& str){
   vector<string> fields=tokenize(str,',');
   for(string cov_str:fields){
     if(cov_str==""){
+      continue;
+    }else if(cov_str.find("-")==0){
+      res.push_back((float)0);
       continue;
     }
     res.push_back(stof(cov_str));
@@ -563,4 +570,23 @@ bool exon_is_contained(std::vector<int> first, std::vector<int> second){
   std::sort(second.begin(), second.end());
   // Check if  all elements of a second vector exists in first vector
   return std::includes(first.begin(), first.end(), second.begin(), second.end());
+}
+
+bool exon_is_contained(std::vector<int> first, int single_element){
+  vector<int> second;
+  second.push_back(single_element);
+  // Sort first vector
+  std::sort(first.begin(), first.end());
+  // Sort second vector
+  std::sort(second.begin(), second.end());
+  // Check if  all elements of a second vector exists in first vector
+  return std::includes(first.begin(), first.end(), second.begin(), second.end());
+}
+
+bool region_is_overlap(pair<int,int> first, pair<int,int> second){
+  if(first.first>second.second||second.first>first.second){
+    return(false);
+  }else{
+    return(true);
+  }
 }

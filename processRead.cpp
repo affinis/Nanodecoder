@@ -16,13 +16,14 @@ int main(int argc, char *argv[]){
   int MinR1Overlap=10;
   vector<int> WordSize;
   int BarcodeLength=16;
-  int barcodeRange=100;
+  string R1a_seq="";
   int tech=5;
   int threads=1;
   bool use_dtw=false;
   bool use_anno=false;
   bool restart=false;
-  while((option=getopt(argc,argv,"hf:b:m:a:r:l:t:d:c:@:"))!=-1){
+  bool debug=false;
+  while((option=getopt(argc,argv,"hf:b:m:a:r:l:t:d:c:@:x"))!=-1){
     switch(option){
     case 'h':
       printf("nanodecoder, identify barcode in long reads, Lin Lyu, 2023\n\n\
@@ -30,12 +31,14 @@ int main(int argc, char *argv[]){
               \t-f\tinput file\n\
               \t-b\tBC whitelist file\n\
               \t-m\tmismatch allowed\n\
-              \t-a\talignmrnt summary file\n\
-              \t-r\tBC search range\n\
+              \t-a\talignment summary file\n\
+              \t-r\tR1a sequence\n\
               \t-t\ttech used 5' or 3'\n\
               \t-d\tusing DTW to rescue reads\n\
+              \t-l\tbarcode length\n\
               \t-c\tcontinue from a broken run, give the filename.tsv produced before\n\
-              \t-@\tthreads used\n\n");
+              \t-@\tthreads used\n\
+              \t-x\tdebug mode\n\n");
       return 0;
     case 'f':
       Readfilename=optarg;
@@ -52,7 +55,7 @@ int main(int argc, char *argv[]){
       Alignmentsummaryfilename=optarg;
       break;
     case 'r':
-      barcodeRange=atoi(optarg);
+      R1a_seq=optarg;
       break;
     case 't':
       tech=atoi(optarg);
@@ -66,8 +69,14 @@ int main(int argc, char *argv[]){
       restart=true;
       previousFile=optarg;
       break;
+    case 'l':
+      BarcodeLength=atoi(optarg);
+      break;
     case '@':
       threads=atoi(optarg);
+      break;
+    case 'x':
+      debug=true;
       break;
     } // end switch
   }// end while
@@ -125,14 +134,14 @@ int main(int argc, char *argv[]){
     if(use_anno){
       readAlignmentSummaryFile(AnnoMap,Alignmentsummaryfilename);
     }
-    ReadFile InputFile(Readfilename,barcodeFile,SegmentsLengths,barcodeRange,MaxMismatch,
-                       tech,threads,AnnoMap,appendfile,model,wl_db,use_dtw,false,latest_read);
+    ReadFile InputFile(Readfilename,barcodeFile,R1a_seq,SegmentsLengths,MaxMismatch,
+                       tech,threads,AnnoMap,appendfile,model,wl_db,use_dtw,debug,latest_read);
   }else{
     if(use_anno){
       readAlignmentSummaryFile(AnnoMap,Alignmentsummaryfilename);
     }
-    ReadFile InputFile(Readfilename,barcodeFile,SegmentsLengths,barcodeRange,MaxMismatch,
-                       tech,threads,AnnoMap,appendfile,nullptr,nullptr,use_dtw,false,latest_read);
+    ReadFile InputFile(Readfilename,barcodeFile,R1a_seq,SegmentsLengths,MaxMismatch,
+                       tech,threads,AnnoMap,appendfile,nullptr,nullptr,use_dtw,debug,latest_read);
     
   }
   if(restart){

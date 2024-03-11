@@ -77,7 +77,7 @@ static inline level_t mer2level(const entry_t *m, const char *mer){
     case 'T':
       x=(x<<2)+3;break;
     default:
-      printf("base %c\n", mer[i]); return -2;
+      fprintf(stderr,"base %c\n", mer[i]); return -2;
     }
   }
   return m[x].l_mean;

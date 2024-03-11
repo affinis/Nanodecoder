@@ -106,12 +106,12 @@ struct exon_feature{
  * @exons pairs of 1-based start&end sites of this gene indicating exon positions
  */
 struct transcript_feature{
-  int start;
-  int end;
+  int start=-1;
+  int end=-1;
   string transcript_id;
   string transcript_name;
-  //vector<pair<int,int>> exons;
   vector<int> exons;
+  vector<int> loose_exons;
 };
 
 /*!
@@ -138,7 +138,37 @@ struct gene_feature{
   string gene_id;
   string gene_name;
   map<int, exon_feature> exons;
+  map<int, exon_feature> loose_exons;
   unordered_map<string,transcript_feature> transcripts;
+  
+  void add_new_exon(int exon_key, pair<int,int> pos){
+    exon_feature new_exon;
+    new_exon.id=this->exons.size();
+    //fprintf(stderr,"%i: %i-%i\n",new_exon.id,pos.first,pos.second);
+    new_exon.pos=pos;
+    this->exons[exon_key]=new_exon;
+  }
+  
+  void add_new_loose_exon(int exon_key, pair<int,int> pos){
+    exon_feature new_exon;
+    new_exon.id=this->loose_exons.size();
+    //fprintf(stderr,"%i: %i-%i\n",new_exon.id,pos.first,pos.second);
+    new_exon.pos=pos;
+    this->loose_exons[exon_key]=new_exon;
+  }
+  
+  void update_loose_exon_info(int exon_key, pair<int,int> new_pos_to_integrate){
+    int new_exon_key;
+    exon_feature new_exon;
+    int old_exon_id=this->loose_exons[exon_key].id;
+    new_exon.id=old_exon_id;
+    int new_start=std::min(this->loose_exons[exon_key].pos.first,new_pos_to_integrate.first);
+    int new_end=std::max(this->loose_exons[exon_key].pos.second,new_pos_to_integrate.second);
+    new_exon.pos={new_start,new_end};
+    new_exon_key=ceil((new_start+new_end)/2);
+    this->loose_exons.erase(exon_key);
+    this->loose_exons[new_exon_key]=new_exon;
+  }
   
   /*!
    * @abstract fill in data from parsed GTF fields, notice when input data are from transcript/exon rather than gene, 
@@ -147,7 +177,8 @@ struct gene_feature{
    * @param core_data, tokenized (with '\t') fields, corresponding to first 8 column of GTF
    * @param aux_data, last (9th) column of GTF, tokenized with ';', the info in this fields depends on core_data[2] (feature type)
    */
-  void fill_in_feature_info(vector<string>& core_data, vector<string>& aux_data, unordered_map<string, int>& afileds_info){
+  void fill_in_feature_info(vector<string>& core_data, vector<string>& aux_data, 
+                            unordered_map<string, int>& afileds_info){
     string gene_type_raw;
     string gene_name_raw;
     string transcript_id_raw;
@@ -184,19 +215,98 @@ struct gene_feature{
         exit(0);
       }
     }else if(core_data[2]=="exon"){
-      int exon_key=ceil((stoi(core_data[3])+stoi(core_data[4]))/2);
+      pair<int,int> this_exon_pos={stoi(core_data[3]),stoi(core_data[4])};
+      int exon_key=ceil((this_exon_pos.first+this_exon_pos.second)/2);
+      
+      bool loose_exon_recorded=false;
+      int loose_recorded_id;
+      //fprintf(stderr,"debug1\n");
+      
+      if(this->loose_exons.find(exon_key)==this->loose_exons.end()){
+        auto exon=this->loose_exons.lower_bound(exon_key);
+        //fprintf(stderr,"debug2\n");
+        if(exon==this->loose_exons.begin()){
+            //fprintf(stderr,"debug1: %i-%i\n",this_exon_pos.first,this_exon_pos.second);
+          if(this->loose_exons.empty()){
+            loose_exon_recorded=false;
+            this->add_new_loose_exon(exon_key,this_exon_pos);
+          }else if(!region_is_overlap(this_exon_pos,exon->second.pos)){
+            loose_exon_recorded=false;
+            this->add_new_loose_exon(exon_key,this_exon_pos);
+          }else{
+            loose_exon_recorded=true;
+            this->update_loose_exon_info(exon->first,this_exon_pos);
+            loose_recorded_id=exon->second.id;
+          }
+        }else if(exon==this->loose_exons.end()){
+            //fprintf(stderr,"debug2: %i-%i\n",this_exon_pos.first,this_exon_pos.second);
+          exon--;
+          if(!region_is_overlap(this_exon_pos,exon->second.pos)){
+            loose_exon_recorded=false;
+            this->add_new_loose_exon(exon_key,this_exon_pos);
+          }else{
+            loose_exon_recorded=true;
+            this->update_loose_exon_info(exon->first,this_exon_pos);
+            loose_recorded_id=exon->second.id;
+          }
+        }else{
+            //fprintf(stderr,"debug3: %i-%i->%i-%i\n",this_exon_pos.first,this_exon_pos.second,exon->second.pos.first,exon->second.pos.second);
+          if(!region_is_overlap(this_exon_pos,exon->second.pos)){
+            exon--;
+              //fprintf(stderr,"debug3.1: %i-%i->%i-%i\n",this_exon_pos.first,this_exon_pos.second,exon->second.pos.first,exon->second.pos.second);
+            if(!region_is_overlap(this_exon_pos,exon->second.pos)){
+                //fprintf(stderr,"debug3.1.1: %i-%i->%i-%i\n",this_exon_pos.first,this_exon_pos.second,exon->second.pos.first,exon->second.pos.second);
+              loose_exon_recorded=false;
+              this->add_new_loose_exon(exon_key,this_exon_pos);
+            }else{
+                //fprintf(stderr,"debug3.1.2: %i-%i->%i-%i\n",this_exon_pos.first,this_exon_pos.second,exon->second.pos.first,exon->second.pos.second);
+              loose_exon_recorded=true;
+                this->update_loose_exon_info(exon->first,this_exon_pos);
+              loose_recorded_id=exon->second.id;
+            }
+          }else{
+              //has existing-exon match, attention, overlap larger than 0 of recorded exon will be considered a match, 
+              //this is a very loose standard
+              //better modification is needed.
+              //fprintf(stderr,"debug3.1: %i-%i->%i-%i\n",this_exon_pos.first,this_exon_pos.second,exon->second.pos.first,exon->second.pos.second);
+              //fprintf(stderr,"debug3.2: %i-%i->%i-%i\n",this_exon_pos.first,this_exon_pos.second,exon->second.pos.first,exon->second.pos.second);
+            loose_exon_recorded=true;
+            this->update_loose_exon_info(exon->first,this_exon_pos);
+            loose_recorded_id=exon->second.id;
+          }
+        }
+      }else{
+        loose_exon_recorded=true;
+        loose_recorded_id=this->loose_exons.find(exon_key)->second.id;
+      }
+        
+      bool exon_recorded=false;
+      int recorded_id;
       if(this->exons.find(exon_key)==this->exons.end()){
         exon_feature this_exon;
         this_exon.id=this->exons.size();
-        this_exon.pos={stoi(core_data[3]),stoi(core_data[4])};
+        this_exon.pos=this_exon_pos;
         this->exons[exon_key]=this_exon;
+      }else{
+        exon_recorded=true;
+        recorded_id=this->exons.find(exon_key)->second.id;
       }
+    
       string i_gene_id=regex_replace(aux_data[0],gene_regex,"");
       transcript_id_raw=get_aux_field("transcript_id",aux_data,afileds_info,"exon");
       string i_transcript_id=regex_replace(transcript_id_raw,transcript_regex,"");
       if(this->gene_id==i_gene_id&&this->transcripts.find(i_transcript_id)!=transcripts.end()){
         pair<int,int> i_pos={stoi(core_data[3]),stoi(core_data[4])};
-        this->transcripts[i_transcript_id].exons.push_back(this->exons[exon_key].id);
+        if(exon_recorded){
+          this->transcripts[i_transcript_id].exons.push_back(recorded_id);
+        }else{
+          this->transcripts[i_transcript_id].exons.push_back(this->exons[exon_key].id);
+        }
+        if(loose_exon_recorded){
+          this->transcripts[i_transcript_id].loose_exons.push_back(loose_recorded_id);
+        }else{
+          this->transcripts[i_transcript_id].loose_exons.push_back(this->loose_exons.size()-1);
+        }
       }else{
         fprintf(stderr,"fill_in_feature_info: ERROR: fill_in_feature_info: type: exon, gene_id: %s does not match to transcript_id: %s, or transcript_id %s is not a key, check GTF\n",
                 this->gene_id.c_str(),i_transcript_id.c_str(),i_transcript_id.c_str());
@@ -353,10 +463,7 @@ struct mapping_info{
    */
   
   void annotateRead(unordered_map<string, map<int,pair<int,string>>>& sorted_gene_features, \
-                    unordered_map<string, gene_feature>& gene_features, bool debug){
-    if(false){
-      debug=true;
-    }
+                    unordered_map<string, gene_feature>& gene_features, bool debug=false){
     vector<int> hits_transcript_idx;
     if(this->qhits.empty()){
       if(debug){
@@ -374,8 +481,12 @@ struct mapping_info{
     for(int hit_index=0;hit_index<this->rhits.size();hit_index++){
       auto feature1=sorted_gene_features[this->refs[hit_index]].upper_bound(this->rhits[hit_index].first);
       auto feature2=sorted_gene_features[this->refs[hit_index]].upper_bound(this->rhits[hit_index].second);
+      int feature_start;
+      int feature_end;
+      string feature_id;
       
-      //no hits on genes throughout genome
+      //no hits on genes throughout genome, notice feature1 comes first to feature2, so if feature1 does not
+      //point to certain gene, feature2 neither.
       if(feature1==sorted_gene_features[this->refs[hit_index]].end()){
         if(debug){
           cout << this->ID << ": non-coding" << endl;
@@ -392,13 +503,39 @@ struct mapping_info{
         }
       }
       
-      int feature_start=feature1->second.first;
-      int feature_end=feature1->first;
+      //determine to use feature1 or feature2, usually one of them query coverage is 0.
+      //notice if one feature is inside another (though very rare), 
+      //this part will call a wrong feature, needs improvement
+      if(feature2!=sorted_gene_features[this->refs[hit_index]].end()){
+        pair<int,int> rhit={this->rhits[hit_index].first,this->rhits[hit_index].second};
+        pair<int,int> feat1={feature1->second.first,feature1->first};
+        pair<int,int> feat2={feature2->second.first,feature2->first};
+        //cout << "hit: " << this->rhits[hit_index].first << "-" << this->rhits[hit_index].second << endl;
+        //cout << "feature1: " << feature1->second.second << ": " << feature1->second.first << "-" << feature1->first << endl;
+        //cout << "feature2: " << feature2->second.second << ": " << feature2->second.first << "-" << feature2->first << endl;
+        //cout << "cov1: " << calculate_cov(rhit,feat1) << endl;
+        //cout << "cov2: " << calculate_cov(rhit,feat2) << endl;
+        float cov1=calculate_cov(rhit,feat1);
+        float cov2=calculate_cov(rhit,feat2);
+        if(cov1>=cov2){
+          feature_start=feature1->second.first;
+          feature_end=feature1->first;
+          feature_id=feature1->second.second;
+        }else{
+          feature_start=feature2->second.first;
+          feature_end=feature2->first;
+          feature_id=feature2->second.second;
+        }
+      }else{
+        feature_start=feature1->second.first;
+        feature_end=feature1->first;
+        feature_id=feature1->second.second;
+      }
+
       int hit_start=this->rhits[hit_index].first;
       int hit_end=this->rhits[hit_index].second;
       int qstart=this->qhits[hit_index].first;
       int qend=this->qhits[hit_index].second;
-      string feature_id=feature1->second.second;
       string feature_strand=num2rna[gene_features[feature_id].strand];
       string hit_strand=this->hit_strands[hit_index];
       float qcov=static_cast<float>(qend-qstart+1)/this->read_length;
@@ -416,8 +553,9 @@ struct mapping_info{
       if(feature2==sorted_gene_features[this->refs[hit_index]].end()||feature_id!=feature2->second.second){
         float rcov=static_cast<float>(feature_end-hit_start+1)/(feature_end-feature_start+1);
         if(debug){
+          cout << feature1->first << "\t" << feature1->second.first << "\t" << feature1->second.second << endl;
           cout << this->ID << ": hit: " << hit_start << "-" << hit_end << ", feature: ";
-          cout << feature_id << ": " << feature_start << "-" << feature_end << " " << qcov << " " << rcov <<endl;
+          cout << feature_id << ": " << feature_start << "-" << feature_end << " " << qcov << " " << rcov << endl;
           continue;
         }else{
           this->features.push_back(feature_id);
@@ -467,8 +605,10 @@ struct mapping_info{
             exit(0);
           }
           if(debug){
+            cout << feature1->first << "\t" << feature1->second.first << "\t" << feature1->second.second << endl;
+            cout << feature2->first << "\t" << feature2->second.first << "\t" << feature2->second.second << endl;
             cout << this->ID << ": hit: " << hit_start << "-" << hit_end << ", feature: ";
-            cout << feature_id << ": " << feature_start << "-" << feature_end << " "  << qcov << " " << rcov <<endl;
+            cout << feature_id << ": " << feature_start << "-" << feature_end << " "  << qcov << " " << rcov << endl;
             continue;
           }else{
             this->features.push_back(feature_id);
@@ -509,7 +649,7 @@ struct mapping_info{
    *          the order of exons is 5' -> 3'. #TAG: see 'glossary'.
    *  
    *  @glossary unspliced: no splicing behavior was observed on read, and the hit region 
-   *                       exceed known exons of the gene.
+   *                       exceed known exonic regions or covers non-exonic regions of the gene.
    *                       
    *            mono_exonic: no splicing behavior was observed on read, but the hit region 
    *                         is in the range of certain known exon of a multi-exon gene.
@@ -524,42 +664,66 @@ struct mapping_info{
    *            ambiguous: splicing behavior was observed on read, but the exons were not
    *                       uniquely matched to known transcripts.
    *                       
-   *            novel: splicing behavior was observed on read, but the exons were not matched
-   *                   to any known transcripts. notice that in some case the exon may be -1, 
-   *                   which indicate the exon is not matched to any known exon (the exon is not
-   *                   recorded in GTF file).
+   *            novel: splicing behavior was observed on read, but the arrange of exons were not 
+   *                   matched to any known transcripts. notice that in some case the exon may be 
+   *                   -1, which indicate the exon is not matched to any known exon (the exon is 
+   *                   not recorded in GTF file).
    *                   
    */
-  void identifyIsoforms(unordered_map<string, gene_feature>& gene_features){
+  void identifyIsoforms(unordered_map<string, gene_feature>& gene_features, bool loose_exon=false){
+    for(int i=0;i<this->features.size();i++){
+      this->transcripts.push_back("*");
+    }
     int index=0;
     for(string feature:this->features){
+      float exon_determine_threshold=0.9;
+      if(loose_exon){
+        exon_determine_threshold=0;
+      }
       string gene_name=gene_features[feature].gene_name;
+      map<int, exon_feature>& exon_table_used=gene_features[feature].exons;
+      if(loose_exon){
+        exon_table_used=gene_features[feature].loose_exons;
+      }
       if(gene_name=="*"){
         gene_name=feature;
       }
       //not mapped or mapped to non-transcript region
       if(feature=="*"){
-        this->transcripts.push_back("*");
+        //this->transcripts.push_back("*");
         index++;
         continue;
       }
+      this->M_identifyIsoform(index,exon_table_used,exon_determine_threshold,gene_features,feature,gene_name,loose_exon);
+      if(!loose_exon && this->transcripts[index].find("novel")!=std::string::npos){
+        //fprintf(stderr,"%s: novel in strict mode: %s\n",this->ID.c_str(),this->transcripts[index].c_str());
+        this->M_identifyIsoform(index,gene_features[feature].loose_exons,0,gene_features,feature,gene_name,true);
+        this->transcripts[index]=this->transcripts[index]+'*';
+      }
+      index++;
+      /*
       //mapped to transcript region and spliced
       if(this->is_spliced[index]){
         vector<int> exons;
         bool has_novel_exon=false;
         for(pair<int,int> segment:this->aligned_segments[index]){
           int key=floor((segment.first+segment.second)/2);
-          auto candidate=gene_features[feature].exons.lower_bound(key);
-          if(candidate==gene_features[feature].exons.end()||calculate_cov(segment,candidate->second.pos)<0.9){
-            if(candidate!=gene_features[feature].exons.begin()){
+          auto candidate=exon_table_used.lower_bound(key);
+          //if(candidate!=gene_features[feature].exons.end()){
+            //fprintf(stderr,"debug1: %i->%i-%i\n",key,candidate->second.pos.first,candidate->second.pos.second);
+          //}
+          if(candidate==exon_table_used.end()||calculate_cov(segment,candidate->second.pos)<=exon_determine_threshold){
+            if(candidate!=exon_table_used.begin()){
               candidate--;
+              //fprintf(stderr,"debug2: %i->%i-%i\n",key,candidate->second.pos.first,candidate->second.pos.second);
             }else{
               exons.push_back(-1);
               has_novel_exon=true;
               continue;
             }
           }
-          if(calculate_cov(segment,candidate->second.pos)>=0.9){
+          if(calculate_cov(segment,candidate->second.pos)>exon_determine_threshold){
+            //fprintf(stderr,"debug3: %i->%i-%i\n",key,candidate->second.pos.first,candidate->second.pos.second);
             exons.push_back(candidate->second.id);
             continue;
           }else{
@@ -580,7 +744,11 @@ struct mapping_info{
           int match=0;
           string latest_transcript_name;
           for(auto transcript:gene_features[feature].transcripts){
-            if(exon_is_contained(transcript.second.exons,exons)){
+            vector<int>& transcript_exons_used=transcript.second.exons;
+            if(loose_exon){
+              transcript_exons_used=transcript.second.loose_exons;
+            }
+            if(exon_is_contained(transcript_exons_used,exons)){
               match++;
               latest_transcript_name=transcript.second.transcript_name;
               if(latest_transcript_name.empty()){
@@ -592,42 +760,210 @@ struct mapping_info{
             }
           } //for(auto transcript:gene_features[feature].transcripts)
           if(match==0){
+            
             this->transcripts.push_back(gene_name+"(novel="+arrange+")");
+            index++;
           }else if(match==1){
             this->transcripts.push_back(latest_transcript_name+"(fsm/ism="+arrange+")");
+            index++;
           }else{
             this->transcripts.push_back(gene_name+"(ambiguous="+arrange+")");
+            index++;
           }
         }//if(has_novel_exon)
         
-      ////mapped to transcript region but no spliced mark was observed, notice mono exon match is included
+      ////mapped to transcript region but no spliced mark was observed, i.e., no 'N's was observed in cigar, 
+      //mono exon match, mono_exonic, and unspliced transcript is included
       }else{
-        if(gene_features[feature].exons.size()==1){
+        if(exon_table_used.size()==1){
           auto the_only_transcript=gene_features[feature].transcripts.begin();
           string the_only_transcript_name=the_only_transcript->second.transcript_name;
           this->transcripts.push_back(the_only_transcript_name+"(mono-exon_match)");
+          index++;
+          continue;
         }else{
           int key=floor((this->aligned_segments[index][0].first+this->aligned_segments[index][0].second)/2);
-          auto candidate=gene_features[feature].exons.lower_bound(key);
-          if(candidate==gene_features[feature].exons.end()||calculate_cov(this->aligned_segments[index][0],candidate->second.pos)<0.9){
-            if(candidate!=gene_features[feature].exons.begin()){
+          auto candidate=exon_table_used.lower_bound(key);
+          if(candidate==exon_table_used.end()||calculate_cov(this->aligned_segments[index][0],candidate->second.pos)<0.9){
+            if(candidate!=exon_table_used.begin()){
               candidate--;
             }else{
               this->transcripts.push_back(gene_features[feature].gene_name+"(unspliced)");
+              index++;
               continue;
             }
           }
           if(calculate_cov(this->aligned_segments[index][0],candidate->second.pos)>=0.9){
-            this->transcripts.push_back(gene_features[feature].gene_name+"(mono_exonic="+to_string(candidate->second.id)+")");
-            continue;
+            int match=0;
+            string latest_transcript_name;
+            for(auto transcript:gene_features[feature].transcripts){
+              vector<int>& transcript_exons_used=transcript.second.exons;
+              if(loose_exon){
+                transcript_exons_used=transcript.second.loose_exons;
+              }
+              if(exon_is_contained(transcript_exons_used,candidate->second.id)){
+                match++;
+                latest_transcript_name=transcript.second.transcript_name;
+                if(latest_transcript_name.empty()){
+                  latest_transcript_name=transcript.second.transcript_id;
+                }
+                continue;
+              }else{
+                continue;
+              }
+            } //for(auto transcript:gene_features[feature].transcripts)
+            //fprintf(stderr,"%s\t%i\n",latest_transcript_name.c_str(),match);
+            //in practice this condition not exist
+            if(match==0){
+              this->transcripts.push_back(gene_name+"(novel="+to_string(candidate->second.id)+")");
+              index++;
+              continue;
+            //mono_exonic
+            }else if(match==1){
+              this->transcripts.push_back(latest_transcript_name+"(mono_exonic="+to_string(candidate->second.id)+")");
+              index++;
+              continue;
+            //the only exon matched to multiple transcripts
+            }else{
+              this->transcripts.push_back(gene_name+"(ambiguous="+to_string(candidate->second.id)+")");
+              index++;
+              continue;
+            }
           }else{
             this->transcripts.push_back(gene_features[feature].gene_name+"(unspliced)");
+            index++;
             continue;
           }
         }
-      }
+      } */
     } //for(string feature:this->features)
   } //identifyIsoforms
+  
+  /*!
+   * @abstract module for isoform identification
+   * 
+   * 
+   */
+  void M_identifyIsoform(int index, map<int, exon_feature>& exon_table_used, float exon_determine_threshold,
+                         unordered_map<string, gene_feature>& gene_features, string feature, string gene_name,
+                         bool loose_exon){
+    //mapped to transcript region and spliced
+    if(this->is_spliced[index]){
+      vector<int> exons;
+      bool has_novel_exon=false;
+      for(pair<int,int> segment:this->aligned_segments[index]){
+        int key=floor((segment.first+segment.second)/2);
+        auto candidate=exon_table_used.lower_bound(key);
+        //if(candidate!=gene_features[feature].exons.end()){
+        //fprintf(stderr,"debug1: %i->%i-%i\n",key,candidate->second.pos.first,candidate->second.pos.second);
+        //}
+        if(candidate==exon_table_used.end()||calculate_cov(segment,candidate->second.pos)<=exon_determine_threshold){
+          if(candidate!=exon_table_used.begin()){
+            candidate--;
+            //fprintf(stderr,"debug2: %i->%i-%i\n",key,candidate->second.pos.first,candidate->second.pos.second);
+          }else{
+            exons.push_back(-1);
+            has_novel_exon=true;
+            continue;
+          }
+        }
+        if(calculate_cov(segment,candidate->second.pos)>exon_determine_threshold){
+          //fprintf(stderr,"debug3: %i->%i-%i\n",key,candidate->second.pos.first,candidate->second.pos.second);
+          exons.push_back(candidate->second.id);
+          continue;
+        }else{
+          exons.push_back(-1);
+          has_novel_exon=true;
+          continue;
+        }
+      } //for(pair<int,int> segment:this->aligned_segments[index])
+      if(gene_features[feature].strand==3){
+        reverse(exons.begin(),exons.end());
+      }
+      string arrange=stringCat(exons,'>');
+      if(has_novel_exon){
+        this->transcripts[index]=gene_name+"(novel="+arrange+")";
+      }else{
+        int match=0;
+        string latest_transcript_name;
+        for(auto transcript:gene_features[feature].transcripts){
+          vector<int>& transcript_exons_used=transcript.second.exons;
+          if(loose_exon){
+            transcript_exons_used=transcript.second.loose_exons;
+          }
+          if(exon_is_contained(transcript_exons_used,exons)){
+            match++;
+            latest_transcript_name=transcript.second.transcript_name;
+            if(latest_transcript_name.empty()){
+              latest_transcript_name=transcript.second.transcript_id;
+            }
+            continue;
+          }else{
+            continue;
+          }
+        } //for(auto transcript:gene_features[feature].transcripts)
+        if(match==0){
+          this->transcripts[index]=gene_name+"(novel="+arrange+")";
+        }else if(match==1){
+          this->transcripts[index]=latest_transcript_name+"(fsm/ism="+arrange+")";
+        }else{
+          this->transcripts[index]=gene_name+"(ambiguous="+arrange+")";
+        }
+      }//if(has_novel_exon)
+      
+      ////mapped to transcript region but no spliced mark was observed, i.e., no 'N's was observed in cigar, 
+      //mono exon match, mono_exonic, and unspliced transcript is included
+    }else{
+      if(exon_table_used.size()==1){
+        auto the_only_transcript=gene_features[feature].transcripts.begin();
+        string the_only_transcript_name=the_only_transcript->second.transcript_name;
+        this->transcripts[index]=the_only_transcript_name+"(mono-exon_match)";
+      }else{
+        int key=floor((this->aligned_segments[index][0].first+this->aligned_segments[index][0].second)/2);
+        auto candidate=exon_table_used.lower_bound(key);
+        if(candidate==exon_table_used.end()||calculate_cov(this->aligned_segments[index][0],candidate->second.pos)<=exon_determine_threshold){
+          if(candidate!=exon_table_used.begin()){
+            candidate--;
+          }else{
+            this->transcripts[index]=gene_features[feature].gene_name+"(unspliced)";
+          }
+        }
+        if(calculate_cov(this->aligned_segments[index][0],candidate->second.pos)>exon_determine_threshold){
+          int match=0;
+          string latest_transcript_name;
+          for(auto transcript:gene_features[feature].transcripts){
+            vector<int>& transcript_exons_used=transcript.second.exons;
+            if(loose_exon){
+              transcript_exons_used=transcript.second.loose_exons;
+            }
+            if(exon_is_contained(transcript_exons_used,candidate->second.id)){
+              match++;
+              latest_transcript_name=transcript.second.transcript_name;
+              if(latest_transcript_name.empty()){
+                latest_transcript_name=transcript.second.transcript_id;
+              }
+              continue;
+            }else{
+              continue;
+            }
+          } //for(auto transcript:gene_features[feature].transcripts)
+          //fprintf(stderr,"%s\t%i\n",latest_transcript_name.c_str(),match);
+          //in practice this condition not exist
+          if(match==0){
+            this->transcripts[index]=gene_name+"(novel="+to_string(candidate->second.id)+")";
+            //mono_exonic
+          }else if(match==1){
+            this->transcripts[index]=latest_transcript_name+"(mono_exonic="+to_string(candidate->second.id)+")";
+            //the only exon matched to multiple transcripts
+          }else{
+            this->transcripts[index]=gene_name+"(ambiguous="+to_string(candidate->second.id)+")";
+          }
+        }else{
+          this->transcripts[index]=gene_features[feature].gene_name+"(unspliced)";
+        }
+      }
+    }
+  } //void M_identifyIsoform
   
   void findFreeRegion(){
     if(this->qhits.size()==0){
@@ -756,7 +1092,8 @@ struct mapping_info{
  * @param GTFfilename
  * @param gene_features: empty map, gene_id-gene_feature, data will be filled in while reading and processing GTF file
  */
-void readFeaturesFromGTF(const char * GTFfilename, unordered_map<string, gene_feature>& gene_features){
+void readFeaturesFromGTF(const char * GTFfilename, unordered_map<string,
+                         gene_feature>& gene_features){
   fprintf(stderr,"Parsing GTF: %s\n",GTFfilename);
   ifstream gtffile;
   gtffile.open(GTFfilename);
@@ -961,7 +1298,7 @@ void readMappingFile(const char * Bamfilename, unordered_map<string, mapping_inf
     }else{
       q_end=qlen;
     }
-    //if read_id not exists
+    //if read_id not exists, i.e. this read have not been recorded in "ReadMapping" structure
     if(ReadMapping.find(bam_get_qname(b))==ReadMapping.end()){
       thismapping.ID=bam_get_qname(b);
       thismapping.hit_strands.push_back(flag);
@@ -1006,11 +1343,15 @@ void readMappingFile(const char * Bamfilename, unordered_map<string, mapping_inf
       ReadMapping[bam_get_qname(b)].aligned_segments.push_back(aligned_segments_to_ref);
       ReadMapping[bam_get_qname(b)].rhits.push_back(rhit);
       ReadMapping[bam_get_qname(b)].is_spliced.push_back(splicing_stat);
-    }
-  }
+    } //if(ReadMapping.find(bam_get_qname(b))==ReadMapping.end())
+  } //while ((r = sam_read1(testfile, h, b)) >= 0)
   bam_destroy1(b);
   bam_hdr_destroy(h);
   ReadMapping[latest_read].debugPrintInfo();
+  ReadMapping[latest_read].findFreeRegion();
+  ReadMapping[latest_read].annotateRead(sorted_gene_features,gene_features,false);
+  ReadMapping[latest_read].writeAnnotation(File);
+  ReadMapping.erase(latest_read);
   fprintf(stderr,"------------------------------------\nAll mappings read, totally %li reads, %li hits\n",num_read, num_hits);
 }
 
