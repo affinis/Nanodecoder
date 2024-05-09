@@ -493,6 +493,18 @@ vector<float> string2covs(string& str){
   return(res);
 }
 
+vector<int> string2ints(string& str){
+  vector<int> res;
+  vector<string> fields=tokenize(str,',');
+  for(string int_str:fields){
+    if(int_str==""){
+      continue;
+    }
+    res.push_back(stoi(int_str));
+  }
+  return(res);
+}
+
 vector<int> string2splice(string& str){
   vector<int> res;
   vector<string> fields=tokenize(str,',');
@@ -533,6 +545,8 @@ bool isContaining(pair<int,int>& query, pair<int,int>& target){
   }
 }
 
+
+//calculate query coverage
 float calculate_cov(pair<int,int>& query, pair<int,int>& subject){
   float cov;
   if(isContaining(query,subject)){
@@ -547,6 +561,42 @@ float calculate_cov(pair<int,int>& query, pair<int,int>& subject){
     cov=0;
   }
   return(cov);
+}
+
+int calculate_min_overhang(pair<int,int>& query, pair<int,int>& subject, int feature_strand, int tech){
+  int query_length=query.second-query.first+1;
+  int subject_length=subject.second-subject.first+1;
+  int res;
+  if(query.second<subject.first||query.first>subject.second){
+    res=99999;
+  }else{
+    int case_key=tech+feature_strand;
+    //fprintf(stderr,"%i\n",case_key);
+    switch(case_key){
+    //3' sequencing, gene is on positive strand
+      case 3:
+        res=abs(query.second-subject.second);
+        break;
+        //fprintf(stderr,"3' sequencing, gene is on positive strand\n");
+    //5' sequencing, gene is on positive strand
+      case 5:
+        res=abs(query.first-subject.first);
+        break;
+        //fprintf(stderr,"5' sequencing, gene is on positive strand\n");
+    //3' sequencing, gene is on negative strand
+      case 6:
+        res=abs(query.first-subject.first);
+        break;
+        //fprintf(stderr,"3' sequencing, gene is on negative strand\n");
+    //5' sequencing, gene is on negative strand
+      case 8:
+        res=abs(query.second-subject.second);
+        break;
+        //fprintf(stderr,"5' sequencing, gene is on negative strand\n");
+    }
+    //return(std::min(abs(query.first-subject.first),abs(query.second-subject.second)));
+  }
+  return(res);
 }
 
 int pair_length(pair<int,int>& pair_in){
@@ -564,10 +614,12 @@ bool exon_is_same(std::vector<int> &first, std::vector<int> &second){
 }
 
 bool exon_is_contained(std::vector<int> first, std::vector<int> second){
+  //we do not need to sort as the exon order is fixed in GTF
+  
   // Sort first vector
-  std::sort(first.begin(), first.end());
+  //std::sort(first.begin(), first.end());
   // Sort second vector
-  std::sort(second.begin(), second.end());
+  //std::sort(second.begin(), second.end());
   // Check if  all elements of a second vector exists in first vector
   return std::includes(first.begin(), first.end(), second.begin(), second.end());
 }

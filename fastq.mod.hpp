@@ -38,18 +38,19 @@ string POLYT="TTTTTTTTTTTTT";
 
 struct ReadAnno{
   string read_id;
-  vector<string> gene_id;
-  vector<string> gene_name;
-  vector<string> transcripts;
-  vector<int> read_orientation;
-  vector<pair<int,int>> free_regions;
-  vector<pair<int,int>> qhits;
-  vector<vector<int>> hit_overlaps;
-  vector<pair<int,int>> occupied_regions;
-  vector<float> qcovs;
-  vector<float> rcovs;
-  vector<int> is_spliced;
-  int flag;
+  vector<string> fields;
+  //vector<string> gene_id;
+  //vector<string> gene_name;
+  //vector<string> transcripts;
+  //vector<int> read_orientation;
+  //vector<pair<int,int>> free_regions;
+  //vector<pair<int,int>> qhits;
+  //vector<vector<int>> hit_overlaps;
+  //vector<pair<int,int>> occupied_regions;
+  //vector<float> qcovs;
+  //vector<float> rcovs;
+  //vector<int> is_spliced;
+  //int flag;
 };
 
 class BarcodeFile{
@@ -141,8 +142,10 @@ public:
   string Quality_trimmed;
   vector<pair<int,int>> freeRegions;
   vector<pair<int,int>> qhits;
+  vector<pair<int,int>> rhits;
   vector<int> qhitOrient;
   vector<float> qhit_covs;
+  vector<string> hit_strands;
   vector<vector<int>> hit_overlaps;
   vector<pair<int,int>> occupiedRegions;
   vector<string> hit_names;
@@ -156,23 +159,25 @@ public:
   vector<int> TSOps;
   vector<int> TSOss;
   vector<int> TSOms;
+  vector<int> annotation_scores;
   int OUTER=-1;
   int INNER=-1;
   vector<string> Kmers;
   int barcodeStart=-1;
   string barcode="*";
   string barcodeStrand;
-  int fusionPoint;
   int barcodeMismatch;
+  int barcodeScore;
+  int annotation_score;
   string stat;
   int polyAT_containing=0;
   int barcode_in_tolerance=0;
   vector<int> barcode_intolerance_indices;
   vector<string> barcode_intolerance_detail;
-  vector<string> matched_kmer_quality;
   vector<int> barcode_mismatches;
   string final_annotation="*";
   string final_transcripts="*";
+  vector<int> breakpoints;
   
   Read(){
     ID="defalut";
@@ -243,7 +248,8 @@ public:
     cout << ID << "\t" << stat << "\t" << R1a_position_str << "\t" << R1a_strand_str << "\t";
     cout << barcode << "\t" << barcodeStart << "\t" << barcodeStrand << "\t" << barcodeMismatch << "\t";
     cout << barcode_in_tolerance << "\t" << barcode_intolerance_detail_str << "\t" << barcode_intolerance_indices_str << "\t" << barcode_mismatches_str << "\t";
-    cout << hit_regions_str << "\t" << hit_strands_str << "\t" << TSO_position_str << "\t" << TSO_strand_str << "\t" << this->final_annotation << "\t"<< this->final_transcripts << endl;
+    cout << hit_regions_str << "\t" << hit_strands_str << "\t" << TSO_position_str << "\t" << TSO_strand_str << "\t" << this->final_annotation << "\t";
+    cout << this->final_transcripts << "\t" << this->barcodeScore << "\t" << this->annotation_score << endl;
   }
   
   void printBarcodeInfo(std::stringstream &stream){
@@ -259,6 +265,7 @@ public:
     vector<string> R1a_strands;
     string TSO_position_str="";
     string TSO_strand_str="";
+    string breakpoints_str;
     vector<string> TSO_strands;
     if(barcode_intolerance_detail.size()==0){
       barcode_intolerance_detail_str="*";
@@ -303,6 +310,12 @@ public:
       TSO_strand_str=stringCat(TSO_strands);
     }
     
+    if(this->breakpoints.empty()){
+      breakpoints_str="*";
+    }else{
+      breakpoints_str=stringCat(this->breakpoints);
+    }
+    
     string hit_regions_str=regions2string(this->qhits);
     string hit_strands_str=strands2string(this->qhitOrient);
     //     1. read_id    2. status          3. R1a_start              4. R1a_strand
@@ -313,8 +326,8 @@ public:
     stream << barcode_in_tolerance << "\t" << barcode_intolerance_detail_str << "\t" << barcode_intolerance_indices_str << "\t" << barcode_mismatches_str << "\t";
     //          13. hit regions           14. hit orientations         15. TSO position           16. TSO strand          17. final annotation
     stream << hit_regions_str << "\t" << hit_strands_str << "\t" << TSO_position_str << "\t" << TSO_strand_str << "\t" << this->final_annotation << "\t";
-    //         18. final transcript
-    stream << this->final_transcripts << endl;
+    //         18. final transcript               19. barcode score             20. annotation score            21. breakpoints
+    stream << this->final_transcripts << "\t" << this->barcodeScore << "\t" << this->annotation_score << "\t" << breakpoints_str << endl;
   }
   
   string choose_annotation(string id, string name){
@@ -406,7 +419,26 @@ public:
     return(true);
   }
   
-  void annotate_read_by_valid_hit(vector<int> valid_hit_idx){
+  int modify_annotation_score(int hit_index){
+    if(this->annotation_scores.size()==1&&
+       this->hit_transcripts[0].find("novel")==string::npos&&
+       this->hit_transcripts[0].find("unspliced")==string::npos){
+      return(0);
+    }
+    int align_score=this->annotation_scores[hit_index];
+    if(this->hit_transcripts[hit_index].find("fsm")!=string::npos||this->hit_transcripts[hit_index].find("ambiguous")!=string::npos){
+      int n_exon=tokenize(this->hit_transcripts[hit_index],'>').size()-1;
+      if(n_exon>=6){
+        return(0);
+      }else{
+        return(align_score/(10^n_exon));
+      }
+    }else{
+      return(align_score);
+    }
+  }
+  
+  void annotate_read_by_valid_hit(vector<int> valid_hit_idx, bool debug){
     // very little case, all of the hit in occupied region have diff strand with R1a
     if(valid_hit_idx.empty()){
       this->final_annotation="Non-transcriptome";
@@ -415,6 +447,8 @@ public:
       if(valid_hit_idx[0]!=-1){
         this->final_annotation=choose_annotation(this->hit_ids[valid_hit_idx[0]],this->hit_names[valid_hit_idx[0]]);
         this->final_transcripts=this->hit_transcripts[valid_hit_idx[0]];
+        //this->annotation_score=this->annotation_scores[valid_hit_idx[0]];
+        this->annotation_score=modify_annotation_score(valid_hit_idx[0]);
       }else{
         this->final_annotation="Non-transcriptome";
       }
@@ -422,18 +456,47 @@ public:
       //multiple hits on same strand, fusion genes or ambiguous mapping
     }else{
       if(is_fusion(valid_hit_idx)){
+        if(debug){
+          fprintf(stderr,"annotate_read_by_valid_hit: fusion gene detected, hit: %i, hit %i\n",valid_hit_idx[0],valid_hit_idx[valid_hit_idx.size()-1]);
+        }
         this->final_annotation="Fusion: ";
         for(int i:valid_hit_idx){
-          this->final_annotation=this->final_annotation+choose_annotation(this->hit_ids[i],this->hit_names[i])+"-";
+          this->final_annotation=this->final_annotation+choose_annotation(this->hit_ids[i],this->hit_names[i])+"::";
+          //first gene in fusion
+          if(i==valid_hit_idx[0]){
+            if(this->hit_strands[i]==num2rna[this->qhitOrient[i]]){
+              this->breakpoints.push_back(this->rhits[i].second);
+            }else{
+              this->breakpoints.push_back(this->rhits[i].first);
+            }
+          //last gene in fusion
+          }else if(i==valid_hit_idx[valid_hit_idx.size()-1]){
+            if(this->hit_strands[i]==num2rna[this->qhitOrient[i]]){
+              this->breakpoints.push_back(this->rhits[i].first);
+            }else{
+              this->breakpoints.push_back(this->rhits[i].second);
+            }
+          }else{
+            if(this->hit_strands[i]==num2rna[this->qhitOrient[i]]){
+              this->breakpoints.push_back(this->rhits[i].first);
+              this->breakpoints.push_back(this->rhits[i].second);
+            }else{
+              this->breakpoints.push_back(this->rhits[i].second);
+              this->breakpoints.push_back(this->rhits[i].first);
+            }
+          }
         }
-        this->final_annotation.erase(this->final_annotation.length()-1);
+        this->final_annotation.erase(this->final_annotation.length()-2);
       }else{
         int best_align_count=0;
-        float best_align_score=0;
+        //float best_align_score=0;
+        int best_align_score=9999;
         int best_align_index=-1;
         for(int i:valid_hit_idx){
-          float align_score=this->qhit_covs[i]*this->hit_covs[i];
-          if(align_score>0&&align_score>best_align_score){
+          //float align_score=this->qhit_covs[i]*this->hit_covs[i];
+          int align_score=modify_annotation_score(i);
+          //if(align_score>0&&align_score>best_align_score){
+          if(align_score>0&&align_score<best_align_score){
             best_align_count=1;
             best_align_score=align_score;
             best_align_index=i;
@@ -449,6 +512,8 @@ public:
           this->final_annotation=choose_annotation(this->hit_ids[best_align_index],
                                                    this->hit_names[best_align_index]);
           this->final_transcripts=this->hit_transcripts[best_align_index];
+          //this->annotation_score=this->annotation_scores[best_align_index];
+          this->annotation_score=best_align_score;
         }else if(best_align_count>1){
           this->final_annotation="Ambiguous_mapping";
         }else{
@@ -468,8 +533,7 @@ public:
    *           genes according to the proportion of overlap to hits.
    * 
    */
-  void add_annotation(int tech){
-    bool debug=false;
+  void add_annotation(int tech, bool debug){
     if(this->R1Aps.empty()){
       return;
     }
@@ -495,6 +559,8 @@ public:
         
         this->final_annotation=choose_annotation(this->hit_ids[0],this->hit_names[0]);
         this->final_transcripts=this->hit_transcripts[0];
+        //this->annotation_score=this->annotation_scores[0];
+        this->annotation_score=modify_annotation_score(0);
       }else{
         if(this->qhitOrient[0]==-1){
           this->final_annotation="Non-transcriptome";
@@ -513,6 +579,8 @@ public:
         if(this->qhitOrient[0]==desired_hit_strand){
           this->final_annotation=choose_annotation(this->hit_ids[0],this->hit_names[0]);
           this->final_transcripts=this->hit_transcripts[0];
+          //this->annotation_score=this->annotation_scores[0];
+          this->annotation_score=modify_annotation_score(0);
         }else{
           if(this->qhitOrient[0]==-1){
             this->final_annotation="Non-transcriptome";
@@ -531,8 +599,7 @@ public:
       }
       
       vector<int> valid_hit=filter_hit_by_strand(this->qhitOrient,desired_hit_strand);
-      //cout << "debug1.5.1" << endl;
-      this->annotate_read_by_valid_hit(valid_hit);
+      this->annotate_read_by_valid_hit(valid_hit,debug);
 
     //happen some times
     }else if(this->hit_ids.size()>1&&this->occupiedRegions.size()>1){
@@ -542,7 +609,7 @@ public:
       
       //cout << "debug1.5.2" << endl;
       vector<int> valid_hit=filter_hit_by_strand_and_region(this->occupiedRegions,this->qhits,this->qhitOrient,this->R1Aps[0],desired_hit_strand);
-      this->annotate_read_by_valid_hit(valid_hit);
+      this->annotate_read_by_valid_hit(valid_hit,debug);
       
     //else condition may not exist
     }else{
@@ -615,6 +682,8 @@ public:
         this->barcodeStart=-1;
         this->barcodeStrand="*";
         this->barcodeMismatch=-1;
+        this->barcodeScore=9999;
+        this->annotation_score=9999;
         break;
       case 'L':
         this->stat="Read_too_long";
@@ -622,6 +691,8 @@ public:
         this->barcodeStart=-1;
         this->barcodeStrand="*";
         this->barcodeMismatch=-1;
+        this->barcodeScore=9999;
+        this->annotation_score=9999;
         break;
       case 'S':
         this->stat="Read_too_short";
@@ -629,6 +700,8 @@ public:
         this->barcodeStart=-1;
         this->barcodeStrand="*";
         this->barcodeMismatch=-1;
+        this->barcodeScore=9999;
+        this->annotation_score=9999;
         break;
       case 'M':
         this->stat="Barcode_missing";
@@ -636,6 +709,8 @@ public:
         this->barcodeStart=-1;
         this->barcodeStrand="*";
         this->barcodeMismatch=-1;
+        this->barcodeScore=9999;
+        this->annotation_score=9999;
         break;
       case 'R':
         this->stat="R1a_missing";
@@ -643,6 +718,8 @@ public:
         this->barcodeStart=-1;
         this->barcodeStrand="*";
         this->barcodeMismatch=-1;
+        this->barcodeScore=9999;
+        this->annotation_score=9999;
         break;
       case 'C':
         this->stat="Complex_structure";
@@ -650,6 +727,8 @@ public:
         this->barcodeStart=-1;
         this->barcodeStrand="*";
         this->barcodeMismatch=-1;
+        this->barcodeScore=9999;
+        this->annotation_score=9999;
         break;
     }
   }
@@ -930,12 +1009,15 @@ public:
       if(isContaining(this->qhits[i],entire_region_1_based_start_end)){
         split_container.qhits.push_back({this->qhits[i].first-entire_region.first,this->qhits[i].second-entire_region.first});
         split_container.qhitOrient.push_back(this->qhitOrient[i]);
+        split_container.rhits.push_back(this->rhits[i]);
+        split_container.hit_strands.push_back(this->hit_strands[i]);
         split_container.hit_ids.push_back(this->hit_ids[i]);
         split_container.hit_names.push_back(this->hit_names[i]);
         split_container.qhit_covs.push_back(this->qhit_covs[i]);
         split_container.hit_covs.push_back(this->hit_covs[i]);
         split_container.spliced.push_back(this->spliced[i]);
         split_container.hit_transcripts.push_back(this->hit_transcripts[i]);
+        split_container.annotation_scores.push_back(this->annotation_scores[i]);
       }
     }
     return;
@@ -961,6 +1043,33 @@ public:
     }
     res.erase(res.begin()+res.length()-1);
     return(res);
+  }
+  
+  void calculateScore(){
+    if(this->stat=="fine_DTW"){
+      this->barcodeScore=this->barcodeMismatch;
+    }else if(this->stat=="fine"){
+      switch(this->barcodeMismatch){
+          case 0:
+            this->barcodeScore=0;
+            break;
+          case 1:
+            this->barcodeScore=20;
+            break;
+          case 2:
+            this->barcodeScore=28;
+            break;
+          case 3:
+            this->barcodeScore=44;
+            break;
+          case 4:
+            this->barcodeScore=75;
+            break;
+          default:
+            this->barcodeScore=9999;
+            break;
+      }
+    }
   }
   
   pair<int, int> isConstantSequenceContaining(string& constantseq, int testRange, int max_testseq_mismatch, int strand, bool loose=false){
@@ -1058,7 +1167,7 @@ public:
    */
   
   void identifyBarcodes(vector<Read>& parent_block, BarcodeFile& barcodes, string R1a_seq, vector<int> segments, int maxMismatch, int tech, unordered_map<string, ReadAnno>& annoMap,
-   const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false, bool debug=false){
+   const entry_t *model=nullptr, WL_DB *wl_db=nullptr, bool dtw=false, bool debug=false, bool dtw_only=false){
     if(R1a_seq!=""){
       TENX_R1=R1a_seq;
     }
@@ -1076,22 +1185,30 @@ public:
       fprintf(stderr,"%s: extracting annotation\n",this->ID.c_str());
     }
     if(!annoMap[this->ID].read_id.empty()){
-      vector<pair<int,int>> freeRegions=annoMap[this->ID].free_regions;
-      this->freeRegions=freeRegions;
-      this->qhits=annoMap[this->ID].qhits;
-      this->hit_overlaps=annoMap[this->ID].hit_overlaps;
-      this->qhitOrient=annoMap[this->ID].read_orientation;
-      this->occupiedRegions=annoMap[this->ID].occupied_regions;
-      this->hit_ids=annoMap[this->ID].gene_id;
+      this->freeRegions=string2regions(annoMap[this->ID].fields[4]);
+      this->qhits=string2regions(annoMap[this->ID].fields[5]);
+      this->rhits=string2regions(annoMap[this->ID].fields[7]);
+      this->hit_overlaps=string2hit_overlaps(annoMap[this->ID].fields[9]);
+      this->qhitOrient=string2strands(annoMap[this->ID].fields[3]);
+      this->occupiedRegions=string2regions(annoMap[this->ID].fields[10]);
+      this->hit_ids=tokenize(annoMap[this->ID].fields[1],',');
+      this->hit_names=tokenize(annoMap[this->ID].fields[2],',');
+      this->hit_strands=tokenize(annoMap[this->ID].fields[14],',');
+      this->annotation_scores=string2ints(annoMap[this->ID].fields[15]);
+      
       if(debug){
-        fprintf(stderr,"%s: %s\n",this->ID.c_str(), stringCat(annoMap[this->ID].gene_name).c_str());
+        //fprintf(stderr,"%s: %s\n",this->ID.c_str(), stringCat(annoMap[this->ID].gene_name).c_str());
+        fprintf(stderr,"%s: %s\n",this->ID.c_str(), stringCat(this->hit_names).c_str());
       }
       
-      this->hit_names=annoMap[this->ID].gene_name;
-      this->hit_transcripts=annoMap[this->ID].transcripts;  
-      this->hit_covs=annoMap[this->ID].rcovs;
-      this->qhit_covs=annoMap[this->ID].qcovs;
-      this->spliced=annoMap[this->ID].is_spliced;
+      //this->hit_transcripts=annoMap[this->ID].transcripts;
+      this->hit_transcripts=tokenize(annoMap[this->ID].fields[13],',');
+      //this->hit_covs=annoMap[this->ID].rcovs;
+      this->hit_covs=string2covs(annoMap[this->ID].fields[8]);
+      //this->qhit_covs=annoMap[this->ID].qcovs;
+      this->qhit_covs=string2covs(annoMap[this->ID].fields[6]);
+      //this->spliced=annoMap[this->ID].is_spliced;
+      this->spliced=string2splice(annoMap[this->ID].fields[11]);
     }
 
     if(this->qhits.empty()){
@@ -1103,7 +1220,7 @@ public:
       fprintf(stderr,"%s: finding R1a\n",this->ID.c_str());
     }
     if(this->R1Aps.empty()){
-      for(pair<int,int> region:freeRegions){
+      for(pair<int,int> region:this->freeRegions){
         if(region.second-region.first+1<TENX_R1.length()){
           continue;
         }else{
@@ -1121,7 +1238,7 @@ public:
         max_tso_mismatch=max_tso_mismatch*3;
         TENX_TSO="CCCATGTACTCTGCGTTGATACCACTGCTT";
       }
-      for(pair<int,int> region:freeRegions){
+      for(pair<int,int> region:this->freeRegions){
         if(region.second-region.first+1<TENX_TSO.length()){
           continue;
         }else{
@@ -1130,11 +1247,26 @@ public:
       }
     }
     
+    if(dtw_only){
+      if(debug){
+        fprintf(stderr,"%s: using DTW directly\n",this->ID.c_str());
+      }
+      this->identifybarcodesDTW(wl_db,model);
+      if(this->barcode=="*"){
+        this->add_flag('M');
+        return;
+      }
+      return;
+    }
+    
     if(debug){
-      fprintf(stderr,"%s: detecting R1a absent\n",this->ID.c_str());
+      fprintf(stderr,"%s: detecting if R1a absent\n",this->ID.c_str());
     }
     if(this->R1Aps.empty()){
       if(dtw){
+        if(debug){
+          fprintf(stderr,"%s: R1a not detected, using dtw\n",this->ID.c_str());
+        }
         this->identifybarcodesDTW(wl_db,model);
         if(this->barcode=="*"){
           this->add_flag('M');
@@ -1174,7 +1306,10 @@ public:
         fprintf(stderr,"%s: validating barcode \n",this->ID.c_str());
       }
       //if barcode can not be found through alignment based method, use DTW instead 
-      if((this->barcode.length()==0||this->barcode.length()==1)&&dtw){
+      if((this->barcode.length()==0||this->barcode.length()==1)&&dtw&&!dtw_only){
+        if(debug){
+          fprintf(stderr,"%s: No valid barcode found, using DTW\n",this->ID.c_str());
+        }
         this->identifybarcodesDTW(wl_db,model);
       }
       
@@ -1182,7 +1317,8 @@ public:
         fprintf(stderr,"%s: adding annotation\n",this->ID.c_str());
       }
       if(this->barcode!="*"){
-        this->add_annotation(tech);
+        this->add_annotation(tech,debug);
+        this->calculateScore();
       }else{
         this->add_flag('M');
       }
@@ -1850,7 +1986,6 @@ private:
           this->barcode_intolerance_detail.push_back(candidate_ori);
           this->barcode_intolerance_indices.push_back(kmer_pos);
           this->barcode_mismatches.push_back(mismatch);
-          //              this->matched_kmer_quality=this->Quality.substr(index,16);
           continue;
         }
       } //for(int m=0;m<candidates.size();m++)
@@ -2198,18 +2333,18 @@ void readAlignmentSummaryFile(unordered_map<string, ReadAnno>& annoMap, string f
     }
     vector<string> fields=tokenize(line,'\t');
     thisAnno.read_id=fields[0];
-    thisAnno.gene_id=tokenize(fields[1],',');
-    thisAnno.gene_name=tokenize(fields[2],',');
-    thisAnno.read_orientation=string2strands(fields[3]);
-    //fprintf(stderr,"%s: %s\n",thisAnno.read_id.c_str(),fields[4].c_str());
-    thisAnno.free_regions=string2regions(fields[4]);
-    thisAnno.qhits=string2regions(fields[5]);
-    thisAnno.qcovs=string2covs(fields[6]);
-    thisAnno.rcovs=string2covs(fields[8]);
-    thisAnno.hit_overlaps=string2hit_overlaps(fields[9]);
-    thisAnno.occupied_regions=string2regions(fields[10]);
-    thisAnno.is_spliced=string2splice(fields[11]);
-    thisAnno.transcripts=tokenize(fields[13],',');
+    thisAnno.fields=fields;
+    //thisAnno.gene_id=tokenize(fields[1],',');
+    //thisAnno.gene_name=tokenize(fields[2],',');
+    //thisAnno.read_orientation=string2strands(fields[3]);
+    //thisAnno.free_regions=string2regions(fields[4]);
+    //thisAnno.qhits=string2regions(fields[5]);
+    //thisAnno.qcovs=string2covs(fields[6]);
+    //thisAnno.rcovs=string2covs(fields[8]);
+    //thisAnno.hit_overlaps=string2hit_overlaps(fields[9]);
+    //thisAnno.occupied_regions=string2regions(fields[10]);
+    //thisAnno.is_spliced=string2splice(fields[11]);
+    //thisAnno.transcripts=tokenize(fields[13],',');
     annoMap[thisAnno.read_id]=thisAnno;
   }
   fprintf(stderr,"Annotation file read.\n");

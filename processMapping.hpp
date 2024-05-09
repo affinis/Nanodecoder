@@ -43,6 +43,7 @@ bool isSpliced(uint32_t* test_cigar, int ncigar){
 }
 
 
+
 /*!
  * @abstract get specific field from aux field of GTF file with key_word, eg: "transcript_id", "transcript_name" etc.
  * 
@@ -84,6 +85,21 @@ string get_aux_field(const string& key_word,vector<string>& aux_data, unordered_
   
   return(res);
 }
+
+/*!
+ * @abstract sequence feature
+ * 
+ * @start 1-based
+ * @end 1-based
+ * @id
+ * 
+ */
+struct seq_feature{
+  int start;
+  int end;
+  int strand;
+  string id;
+};
 
 /*!
  * @abstract exon feature
@@ -397,6 +413,7 @@ struct mapping_info{
   vector<string> transcripts;
   vector<float> rcovs;
   vector<pair<int, int>> rhits;
+  vector<int> annotation_scores;
   vector<string> read_orientations;
   vector<pair<int,int>> occupiedRegion;
   vector<pair<int,int>> freeRegion;
@@ -429,6 +446,8 @@ struct mapping_info{
     string rhits_str=vector_pair_int2str(this->rhits);
     string rcov_str=stringCat(this->rcovs);
     string is_spliced_str=stringCat(this->is_spliced);
+    string hit_strand_str=stringCat(this->hit_strands);
+    string annotation_score_str=stringCat(this->annotation_scores);
     if(this->mergedRegions.empty()){
       merged_hits_str="*";
     }else{
@@ -445,184 +464,180 @@ struct mapping_info{
     File << this->ID << "\t" << this->final_annotation_id << "\t" << this->final_annotation_name << "\t";
     File << this->read_orientation << "\t" << free_region_str << "\t" << qhits_str << "\t" << qcov_str << "\t";
     File << rhits_str << "\t" << rcov_str << "\t" <<  merged_hits_str << "\t";
-    File << occupied_region_str << "\t" << is_spliced_str << "\t" << aligned_segments << "\t" << final_transcript_name << "\n";
+    File << occupied_region_str << "\t" << is_spliced_str << "\t" << aligned_segments << "\t" << final_transcript_name << "\t";
+    File << hit_strand_str << "\t" << annotation_score_str << "\n";
   }
   
+  int choose_from_overlapping_feature(pair<int,int>& rhit, vector<seq_feature> overlapping_features){
+    if(overlapping_features.size()==0){
+      return(0);
+    }
+    int min_overhang_index;
+    float min_overhang;
+    for(int i=0;i<overlapping_features.size();i++){
+      pair<int,int> feat_pos={overlapping_features[i].start,overlapping_features[i].end};
+      float overhang=abs(calculate_cov(feat_pos,rhit)-1);
+      if(i==0){
+        min_overhang_index=i;
+        min_overhang=overhang;
+      }else{
+        if(overhang<min_overhang){
+          min_overhang_index=i;
+        }else{
+          continue;
+        }
+      }
+    }
+    return(min_overhang_index);
+  }
   
   /*!
    * @abstract annotate read with gene features
    * 
    * @param sorted_gene_features: .first chromosome
    *                              .second <map>, end position on its genome, sorted key
-   *                              .second.first feature start
-   *                              .second.second gene_id
+   *                              .second[i].first feature start
+   *                              .second[i].second gene_id
    * @param gene_features: .first gene_id
    *                       .second mapping_info
    * @param debug
    * 
    */
   
-  void annotateRead(unordered_map<string, map<int,pair<int,string>>>& sorted_gene_features, \
-                    unordered_map<string, gene_feature>& gene_features, bool debug=false){
+  void annotateRead(unordered_map<string, map<int,vector<seq_feature>>>& sorted_gene_features, \
+                    unordered_map<string, gene_feature>& gene_features, int tech, bool debug=false){
     vector<int> hits_transcript_idx;
+    if(debug){
+      fprintf(stderr,"annotateRead: debug1: %s: start annotation\n",this->ID.c_str());
+    }
     if(this->qhits.empty()){
       if(debug){
-        cout << this->ID << ": unmapped" << endl;
+        fprintf(stderr,"annotateRead: debug1: %s: unmapped\n",this->ID.c_str());
       }
       this->mapped_to_genome=false;
       this->mapped_to_transcriptome=false;
       this->final_annotation_id="*";
       this->final_annotation_name="*";
       this->read_orientation="*";
+      this->annotation_scores.push_back(9999);
       return;
     }else{
+      if(debug){
+        fprintf(stderr,"annotateRead: debug1: %s: mapped to genome\n",this->ID.c_str());
+      }
       this->mapped_to_genome=true;
     }
     for(int hit_index=0;hit_index<this->rhits.size();hit_index++){
-      auto feature1=sorted_gene_features[this->refs[hit_index]].upper_bound(this->rhits[hit_index].first);
-      auto feature2=sorted_gene_features[this->refs[hit_index]].upper_bound(this->rhits[hit_index].second);
-      int feature_start;
-      int feature_end;
-      string feature_id;
-      
-      //no hits on genes throughout genome, notice feature1 comes first to feature2, so if feature1 does not
-      //point to certain gene, feature2 neither.
-      if(feature1==sorted_gene_features[this->refs[hit_index]].end()){
-        if(debug){
-          cout << this->ID << ": non-coding" << endl;
-          continue;
-        }else{
-          this->features.push_back("*");
-          this->read_orientations.push_back("*");
-          int qstart=this->qhits[hit_index].first;
-          int qend=this->qhits[hit_index].second;
-          float qcov=static_cast<float>(qend-qstart+1)/this->read_length;
-          this->qcovs.push_back(qcov);
-          this->rcovs.push_back(0);
-          continue;
-        }
-      }
-      
-      //determine to use feature1 or feature2, usually one of them query coverage is 0.
-      //notice if one feature is inside another (though very rare), 
-      //this part will call a wrong feature, needs improvement
-      if(feature2!=sorted_gene_features[this->refs[hit_index]].end()){
-        pair<int,int> rhit={this->rhits[hit_index].first,this->rhits[hit_index].second};
-        pair<int,int> feat1={feature1->second.first,feature1->first};
-        pair<int,int> feat2={feature2->second.first,feature2->first};
-        //cout << "hit: " << this->rhits[hit_index].first << "-" << this->rhits[hit_index].second << endl;
-        //cout << "feature1: " << feature1->second.second << ": " << feature1->second.first << "-" << feature1->first << endl;
-        //cout << "feature2: " << feature2->second.second << ": " << feature2->second.first << "-" << feature2->first << endl;
-        //cout << "cov1: " << calculate_cov(rhit,feat1) << endl;
-        //cout << "cov2: " << calculate_cov(rhit,feat2) << endl;
-        float cov1=calculate_cov(rhit,feat1);
-        float cov2=calculate_cov(rhit,feat2);
-        if(cov1>=cov2){
-          feature_start=feature1->second.first;
-          feature_end=feature1->first;
-          feature_id=feature1->second.second;
-        }else{
-          feature_start=feature2->second.first;
-          feature_end=feature2->first;
-          feature_id=feature2->second.second;
-        }
-      }else{
-        feature_start=feature1->second.first;
-        feature_end=feature1->first;
-        feature_id=feature1->second.second;
-      }
-
-      int hit_start=this->rhits[hit_index].first;
-      int hit_end=this->rhits[hit_index].second;
       int qstart=this->qhits[hit_index].first;
       int qend=this->qhits[hit_index].second;
-      string feature_strand=num2rna[gene_features[feature_id].strand];
-      string hit_strand=this->hit_strands[hit_index];
       float qcov=static_cast<float>(qend-qstart+1)/this->read_length;
-      this->qcovs.push_back(qcov);
+      int query_key1=this->rhits[hit_index].first;
+      int query_key2=this->rhits[hit_index].second;
+      auto candidate_feature1=sorted_gene_features[this->refs[hit_index]].lower_bound(query_key1);
+      auto candidate_feature2=sorted_gene_features[this->refs[hit_index]].lower_bound(query_key2);
+      pair<int,int> rhit={this->rhits[hit_index].first,this->rhits[hit_index].second};
+      vector<seq_feature> candidate_feature_set;
       
-      /*
-       * feature->second.first: start position of feature
-       *        feature->first: end position of feature
-       *    map.rhits[x].first: start position of hit
-       *   map.rhits[x].second: end position of hit
-       * 
-       * hit                +-----------------------+
-       * feature    +-----------------------+
-       */
-      if(feature2==sorted_gene_features[this->refs[hit_index]].end()||feature_id!=feature2->second.second){
-        float rcov=static_cast<float>(feature_end-hit_start+1)/(feature_end-feature_start+1);
+      if(debug){
+        fprintf(stderr,"annotateRead: debug2: hit: %i/%lu, %i-%i\n",hit_index+1,this->rhits.size(),rhit.first,rhit.second);
+      }
+
+      if(candidate_feature1==sorted_gene_features[this->refs[hit_index]].end()){
         if(debug){
-          cout << feature1->first << "\t" << feature1->second.first << "\t" << feature1->second.second << endl;
-          cout << this->ID << ": hit: " << hit_start << "-" << hit_end << ", feature: ";
-          cout << feature_id << ": " << feature_start << "-" << feature_end << " " << qcov << " " << rcov << endl;
-          continue;
-        }else{
-          this->features.push_back(feature_id);
-          this->rcovs.push_back(rcov);
-          hits_transcript_idx.push_back(hit_index);
-          if(feature_strand==hit_strand){
-            this->read_orientations.push_back("forward");
-          }else{
-            this->read_orientations.push_back("reverse");
-          }
-          continue;
+          fprintf(stderr,"annotateRead: debug2.1: %s: non-coding\n",this->ID.c_str());
         }
+        this->features.push_back("*");
+        this->read_orientations.push_back("*");
+        this->qcovs.push_back(qcov);
+        this->rcovs.push_back(0);
+        this->annotation_scores.push_back(9999);
+        continue;
       }else{
-        /*
-         * hit     +-----------------------+  
-         * feature                              +--------------------------+
-         */
-        if(feature_start>=hit_end){
-          float rcov=0;
-          if(debug){
-            cout << this->ID << ": hit: " << hit_start << "-" << hit_end << ", feature: ";
-            cout << feature_id << ": " << feature_start << "-" << feature_end;
-            cout << " non-coding" << endl;
-            continue;
-          }else{
-            this->features.push_back("*");
-            this->rcovs.push_back(rcov);
-            this->read_orientations.push_back("*");
-            continue;
-          }
-          /*
-           * hit            +--------------------+
-           * feature     +--------------------------+
-           * 
-           * hit         +--------------------+
-           * feature           +--------------------------+
-           */
-        }else{
-          float rcov;
-          if(hit_start>=feature_start){
-            rcov=static_cast<float>(hit_end-hit_start+1)/(feature_end-feature_start+1);
-          }else if(hit_start<feature_start){
-            rcov=static_cast<float>(hit_end-feature_start+1)/(feature_end-feature_start+1);
-          }else{
-            fprintf(stderr,"annotateRead: ERROR, unexpected condition, hit_start-hit_end;\
-            feature_start-feature_end: %i-%i;%i-%i",hit_start,hit_end,feature_start,feature_end);
-            exit(0);
-          }
-          if(debug){
-            cout << feature1->first << "\t" << feature1->second.first << "\t" << feature1->second.second << endl;
-            cout << feature2->first << "\t" << feature2->second.first << "\t" << feature2->second.second << endl;
-            cout << this->ID << ": hit: " << hit_start << "-" << hit_end << ", feature: ";
-            cout << feature_id << ": " << feature_start << "-" << feature_end << " "  << qcov << " " << rcov << endl;
-            continue;
-          }else{
-            this->features.push_back(feature_id);
-            this->rcovs.push_back(rcov);
-            hits_transcript_idx.push_back(hit_index);
-            if(feature_strand==hit_strand){
-              this->read_orientations.push_back("forward");
-            }else{
-              this->read_orientations.push_back("reverse");
-            }
-            continue;
-          }
+        if(debug){
+          fprintf(stderr,"annotateRead: debug2.2: %s: adding candidate1 features\n",this->ID.c_str());
+        }
+        int candidate1_shift_time=0;
+        while(candidate1_shift_time<10&&candidate_feature1!=sorted_gene_features[this->refs[hit_index]].end()){
+          candidate_feature_set.push_back(candidate_feature1->second[choose_from_overlapping_feature(rhit,candidate_feature1->second)]);
+          candidate1_shift_time++;
+          candidate_feature1++;
         }
       }
+      
+      if(debug){
+        fprintf(stderr,"annotateRead: debug2.3: %s: adding candidate2 features\n",this->ID.c_str());
+      }
+      if(candidate_feature2!=sorted_gene_features[this->refs[hit_index]].end()){
+        candidate_feature_set.push_back(candidate_feature2->second[choose_from_overlapping_feature(rhit,candidate_feature2->second)]);
+      }
+      int candidate2_shift_time=0;
+      while(candidate2_shift_time<10&&candidate_feature2!=sorted_gene_features[this->refs[hit_index]].begin()){
+          candidate_feature2--;
+          candidate_feature_set.push_back(candidate_feature2->second[choose_from_overlapping_feature(rhit,candidate_feature2->second)]);
+          candidate2_shift_time++;
+      }
+      
+      if(debug){
+        fprintf(stderr,"annotateRead: debug2.4: %s: iterating candidate features\n",this->ID.c_str());
+      }
+      int min_overhang=1000000;
+      float max_rcov=0;
+      string best_hit_id;
+      seq_feature best_feature;
+      for(seq_feature candidate_feature:candidate_feature_set){
+        if(debug){
+          fprintf(stderr,"annotateRead: debug2.4.1: %s: %s strand:%i position: %i-%i\n",this->ID.c_str(),
+                  candidate_feature.id.c_str(),candidate_feature.strand,candidate_feature.start,candidate_feature.end);
+        }
+        int feature_strand=candidate_feature.strand;
+        pair<int,int> feature_hit={candidate_feature.start,candidate_feature.end};
+        float feature_cov=calculate_cov(feature_hit,rhit);
+        float rhit_cov=calculate_cov(rhit,feature_hit);
+        int rhit_overhang=calculate_min_overhang(rhit,feature_hit,feature_strand,tech);
+        if(debug){
+          fprintf(stderr,"annotateRead: debug2.4.2: %s: %s: %f\t%i\n",this->ID.c_str(),
+                  candidate_feature.id.c_str(),feature_cov,rhit_overhang);
+        }
+        if(feature_cov==0){
+          continue;
+        }
+        //if(rhit_overhang<=min_overhang){
+        if(rhit_overhang/feature_cov<min_overhang/max_rcov||max_rcov==0){
+          max_rcov=feature_cov;
+          min_overhang=rhit_overhang;
+          best_hit_id=candidate_feature.id;
+          best_feature=candidate_feature;
+        }
+      }
+      
+      if(max_rcov==0){
+        if(debug){
+          fprintf(stderr,"annotateRead: debug2.5: %s: no feature for this hit\n",this->ID.c_str());
+        }
+        this->features.push_back("*");
+        this->read_orientations.push_back("*");
+        this->qcovs.push_back(qcov);
+        this->rcovs.push_back(0);
+        this->annotation_scores.push_back(9999);
+        continue;
+      }
+      
+      if(debug){
+        fprintf(stderr,"annotateRead: debug2.6: %s: %s: %i-%i\n",this->ID.c_str(),best_feature.id.c_str(),best_feature.start,best_feature.end);
+      }
+      this->features.push_back(best_hit_id);
+      string feature_strand=num2rna[gene_features[best_hit_id].strand];
+      string hit_strand=this->hit_strands[hit_index];
+      this->qcovs.push_back(qcov);
+      this->rcovs.push_back(max_rcov);
+      hits_transcript_idx.push_back(hit_index);
+      this->annotation_scores.push_back(floor(min_overhang/10));
+      if(feature_strand==hit_strand){
+        this->read_orientations.push_back("forward");
+      }else{
+        this->read_orientations.push_back("reverse");
+      }
+      continue;
     } //for(int hit_index=0;hit_index<this->rhits.size();hit_index++)
     
     this->identifyIsoforms(gene_features);
@@ -695,7 +710,8 @@ struct mapping_info{
         continue;
       }
       this->M_identifyIsoform(index,exon_table_used,exon_determine_threshold,gene_features,feature,gene_name,loose_exon);
-      if(!loose_exon && this->transcripts[index].find("novel")!=std::string::npos){
+      if((!loose_exon && this->transcripts[index].find("novel")!=std::string::npos)||
+         (this->transcripts[index].find(">")==std::string::npos && this->transcripts[index].find("unspliced")==std::string::npos)){
         //fprintf(stderr,"%s: novel in strict mode: %s\n",this->ID.c_str(),this->transcripts[index].c_str());
         this->M_identifyIsoform(index,gene_features[feature].loose_exons,0,gene_features,feature,gene_name,true);
         this->transcripts[index]=this->transcripts[index]+'*';
@@ -1093,7 +1109,7 @@ struct mapping_info{
  * @param gene_features: empty map, gene_id-gene_feature, data will be filled in while reading and processing GTF file
  */
 void readFeaturesFromGTF(const char * GTFfilename, unordered_map<string,
-                         gene_feature>& gene_features){
+                         gene_feature>& gene_features, bool loose_transcript=false){
   fprintf(stderr,"Parsing GTF: %s\n",GTFfilename);
   ifstream gtffile;
   gtffile.open(GTFfilename);
@@ -1138,6 +1154,9 @@ void readFeaturesFromGTF(const char * GTFfilename, unordered_map<string,
         gene_features[i_gene_id].fill_in_feature_info(core_fields,aux_fields,afileds_info);
       }
     }else if(core_fields[2]=="transcript"){
+      if(aux_data.find("transcript_support_level \"1\"")==string::npos&&!loose_transcript){
+        continue;
+      }
       string i_gene_id=regex_replace(aux_fields[0],gene_regex,"");
       if(gene_features.find(i_gene_id)==gene_features.end()){
         gene_feature feature;
@@ -1150,6 +1169,9 @@ void readFeaturesFromGTF(const char * GTFfilename, unordered_map<string,
         gene_features[i_gene_id].fill_in_feature_info(core_fields,aux_fields,afileds_info);
       }
     }else if(core_fields[2]=="exon"){
+      if(aux_data.find("transcript_support_level \"1\"")==string::npos&&!loose_transcript){
+        continue;
+      }
       string i_transcript_id_raw=get_aux_field("transcript_id",aux_fields,afileds_info,"exon");
       string i_gene_id=regex_replace(aux_fields[0],gene_regex,"");
       string i_transcript_id=regex_replace(i_transcript_id_raw,transcript_regex,"");
@@ -1188,22 +1210,28 @@ void readFeaturesFromGTF(const char * GTFfilename, unordered_map<string,
 }
 
 /*!
- * @abstract sort features by start site in each chromosome
+ * @abstract sort features by end position in each chromosome
  * 
  * @param gene_features: reference (c++) of raw data from GTF filled in by readFeaturesFromGTF().
  * @param sorted_features: reference (c++) of sorted data, sorting are performed within 
  *        chromosome (unordered_map.first) by end position (map.first). map.second.first = start position,
  *        map.second.second = gene_name.
  */
-void sortFeaturesByCoord(unordered_map<string, gene_feature>& gene_features, unordered_map<string, map<int, pair<int,string>>>& sorted_features){
+void sortFeaturesByCoord(unordered_map<string, gene_feature>& gene_features, unordered_map<string, map<int, vector<seq_feature>>>& sorted_features){
   fprintf(stderr,"Start sorting features\n");
   for(auto feature:gene_features){
+    int key=feature.second.end;
+    seq_feature i_feature;
+    i_feature.start=feature.second.start;
+    i_feature.end=feature.second.end;
+    i_feature.strand=feature.second.strand;
+    i_feature.id=feature.second.gene_id;
     if(sorted_features[feature.second.chromosome].empty()){
-      map<int, pair<int,string>> i_chr;
+      map<int, vector<seq_feature>> i_chr;
       sorted_features[feature.second.chromosome]=i_chr;
-      sorted_features[feature.second.chromosome][feature.second.end]={feature.second.start,feature.second.gene_id};
+      sorted_features[feature.second.chromosome][key].push_back(i_feature);
     }else{
-      sorted_features[feature.second.chromosome][feature.second.end]={feature.second.start,feature.second.gene_id};
+      sorted_features[feature.second.chromosome][key].push_back(i_feature);
     }
   }
   fprintf(stderr,"Finished sorting features\n");
@@ -1229,8 +1257,8 @@ vector<pair<int,int>> get_segments_to_ref(uint32_t* CIGAR, int ncigar, int rstar
   return(res);
 }
 
-void readMappingFile(const char * Bamfilename, unordered_map<string, mapping_info>& ReadMapping, unordered_map<string, map<int,pair<int,string>>>& sorted_gene_features, \
-                     unordered_map<string, gene_feature>& gene_features, bool debug, ofstream& File){
+void readMappingFile(const char * Bamfilename, unordered_map<string, mapping_info>& ReadMapping, unordered_map<string, map<int,vector<seq_feature>>>& sorted_gene_features, \
+                     unordered_map<string, gene_feature>& gene_features, int tech, bool debug, ofstream& File){
   fprintf(stderr,"start to read BAM file\n");
   int r=0;
   unsigned long int num_hits=0;
@@ -1316,14 +1344,8 @@ void readMappingFile(const char * Bamfilename, unordered_map<string, mapping_inf
       ReadMapping[bam_get_qname(b)]=thismapping;
       num_read++;
       if(latest_read.length()!=0){
-        if(num_read<7){
-          ReadMapping[latest_read].debugPrintInfo();
-        }
-        if(num_read==7){
-          fprintf(stderr,"............\n");
-        }
         ReadMapping[latest_read].findFreeRegion();
-        ReadMapping[latest_read].annotateRead(sorted_gene_features,gene_features,false);
+        ReadMapping[latest_read].annotateRead(sorted_gene_features,gene_features,tech,debug);
         ReadMapping[latest_read].writeAnnotation(File);
         ReadMapping.erase(latest_read);
       }
@@ -1347,14 +1369,12 @@ void readMappingFile(const char * Bamfilename, unordered_map<string, mapping_inf
   } //while ((r = sam_read1(testfile, h, b)) >= 0)
   bam_destroy1(b);
   bam_hdr_destroy(h);
-  ReadMapping[latest_read].debugPrintInfo();
   ReadMapping[latest_read].findFreeRegion();
-  ReadMapping[latest_read].annotateRead(sorted_gene_features,gene_features,false);
+  ReadMapping[latest_read].annotateRead(sorted_gene_features,gene_features,tech,debug);
   ReadMapping[latest_read].writeAnnotation(File);
   ReadMapping.erase(latest_read);
   fprintf(stderr,"------------------------------------\nAll mappings read, totally %li reads, %li hits\n",num_read, num_hits);
 }
-
 
   
   
