@@ -368,7 +368,7 @@ public:
     return(min_dist_index);
   }
   
-  vector<int> filter_hit_by_strand(vector<int>& strands, int target_strand){
+  vector<int> filter_hit_by_strand(vector<int>& strands, int target_strand, bool debug=false){
     vector<int> valid_hit_idx;
     bool all_non_transcript=true;
     for(int i=0;i<strands.size();i++){
@@ -380,6 +380,9 @@ public:
     }
     if(all_non_transcript){
       valid_hit_idx.push_back(-1);
+    }
+    if(debug){
+      fprintf(stderr,"returning valid hit: %s\n",stringCat(valid_hit_idx).c_str());
     }
     return(valid_hit_idx);
   }
@@ -402,15 +405,21 @@ public:
     return(res);
   }
   
-  bool is_fusion(vector<int>& valid_hit,float threshould=0.4){
+  bool is_fusion(vector<int>& valid_hit,float threshould=0.4, bool debug=false){
     for(int i:valid_hit){
       for(int j:valid_hit){
         if(i==j){
           continue;
         }
+        if(debug){
+          fprintf(stderr,"is_fusion: comparing %i:%i\n",i,j);
+        }
         pair<int,int> query=this->qhits[i];
         pair<int,int> subject=this->qhits[j];
         float cov=calculate_cov(query,subject);
+        if(debug){
+          fprintf(stderr,"is_fusion: coverage %f\n",cov);
+        }
         if(cov>0.4){
           return(false);
         }
@@ -419,19 +428,38 @@ public:
     return(true);
   }
   
-  int modify_annotation_score(int hit_index){
-    if(this->annotation_scores.size()==1&&
-       this->hit_transcripts[0].find("novel")==string::npos&&
-       this->hit_transcripts[0].find("unspliced")==string::npos){
+  int modify_annotation_score(int hit_index, bool debug){
+    if(debug){
+      fprintf(stderr,"modify_annotation_score: %s\n",this->hit_names[hit_index].c_str());
+    }
+    if(this->annotation_scores.size()==1){
       return(0);
     }
     int align_score=this->annotation_scores[hit_index];
-    if(this->hit_transcripts[hit_index].find("fsm")!=string::npos||this->hit_transcripts[hit_index].find("ambiguous")!=string::npos){
-      int n_exon=tokenize(this->hit_transcripts[hit_index],'>').size()-1;
-      if(n_exon>=6){
+    if(this->hit_transcripts[hit_index].find("fsm")!=string::npos||this->hit_transcripts[hit_index].find("ambiguous")!=string::npos||
+       this->hit_transcripts[hit_index].find("novel")!=string::npos){
+      int n_exon=tokenize(this->hit_transcripts[hit_index],'>').size()-2;
+      if(n_exon<=0){
+        n_exon=1;
+      }
+      int n_novel_exon=tokenize(tokenize(this->hit_transcripts[hit_index],'=')[1],'-').size()-1;
+      int n_equivalent_exon=n_exon-2*n_novel_exon;
+      if(debug){
+        fprintf(stderr,"modify_annotation_score: total exon: %i, novel exon: %i, equivalent exon: %i\n",n_exon,n_novel_exon,n_equivalent_exon);
+      }
+      if(n_equivalent_exon>=5){
         return(0);
+      }else if(n_equivalent_exon<=-5){
+        return(999999);
       }else{
-        return(align_score/(10^n_exon));
+        int final_score=(align_score+1)/pow(10,n_equivalent_exon);
+        if(final_score>999999){
+          final_score=999999;
+        }
+        if(debug){
+          fprintf(stderr,"modify_annotation_score: divider: %f, final score: %i\n",(float)pow(10,n_equivalent_exon),final_score);
+        }
+        return(final_score);
       }
     }else{
       return(align_score);
@@ -441,21 +469,32 @@ public:
   void annotate_read_by_valid_hit(vector<int> valid_hit_idx, bool debug){
     // very little case, all of the hit in occupied region have diff strand with R1a
     if(valid_hit_idx.empty()){
-      this->final_annotation="Non-transcriptome";
+      if(debug){
+        fprintf(stderr,"annotate_read_by_valid_hit: No valid hit\n");
+      }
+      //this->final_annotation="Non-transcriptome";
+      this->add_flag('N');
       // ideal case, only one hit have same strand with R1a
     }else if(valid_hit_idx.size()==1){
+      if(debug){
+        fprintf(stderr,"annotate_read_by_valid_hit: 1 valid hit\n");
+      }
       if(valid_hit_idx[0]!=-1){
         this->final_annotation=choose_annotation(this->hit_ids[valid_hit_idx[0]],this->hit_names[valid_hit_idx[0]]);
         this->final_transcripts=this->hit_transcripts[valid_hit_idx[0]];
         //this->annotation_score=this->annotation_scores[valid_hit_idx[0]];
-        this->annotation_score=modify_annotation_score(valid_hit_idx[0]);
+        this->annotation_score=modify_annotation_score(valid_hit_idx[0],debug);
       }else{
-        this->final_annotation="Non-transcriptome";
+        //this->final_annotation="Non-transcriptome";
+        this->add_flag('N');
       }
       
       //multiple hits on same strand, fusion genes or ambiguous mapping
     }else{
-      if(is_fusion(valid_hit_idx)){
+      if(debug){
+        fprintf(stderr,"annotate_read_by_valid_hit: fusion gene test\n");
+      }
+      if(is_fusion(valid_hit_idx,0.4,debug)){
         if(debug){
           fprintf(stderr,"annotate_read_by_valid_hit: fusion gene detected, hit: %i, hit %i\n",valid_hit_idx[0],valid_hit_idx[valid_hit_idx.size()-1]);
         }
@@ -490,34 +529,48 @@ public:
       }else{
         int best_align_count=0;
         //float best_align_score=0;
-        int best_align_score=9999;
+        int best_align_score=1000000;
         int best_align_index=-1;
         for(int i:valid_hit_idx){
           //float align_score=this->qhit_covs[i]*this->hit_covs[i];
-          int align_score=modify_annotation_score(i);
+          int align_score=modify_annotation_score(i,debug);
           //if(align_score>0&&align_score>best_align_score){
-          if(align_score>0&&align_score<best_align_score){
+          if(align_score>=0&&align_score<best_align_score){
             best_align_count=1;
             best_align_score=align_score;
             best_align_index=i;
-          }else if(align_score>0&&align_score==best_align_score){
+            if(debug){
+              fprintf(stderr,"annotate_read_by_valid_hit: best_align_index: %i\n",best_align_index);
+            }
+          }else if(align_score>=0&&align_score==best_align_score){
             best_align_count++;
           }else{
             continue;
           }
         }
+        if(debug){
+          fprintf(stderr,"annotate_read_by_valid_hit: best align count: %i\n",best_align_count);
+        }
         if(best_align_count==1){
-          //cout << best_align_index << endl;
-          //cout << best_align_score << endl;
+          if(debug){
+            fprintf(stderr,"annotate_read_by_valid_hit: choosing annotation: %i\n",best_align_index);
+          }
           this->final_annotation=choose_annotation(this->hit_ids[best_align_index],
                                                    this->hit_names[best_align_index]);
+          if(debug){
+            fprintf(stderr,"annotate_read_by_valid_hit: extracting transcript name\n");
+          }
           this->final_transcripts=this->hit_transcripts[best_align_index];
-          //this->annotation_score=this->annotation_scores[best_align_index];
+          if(debug){
+            fprintf(stderr,"annotate_read_by_valid_hit: adding annotation score\n");
+          }
           this->annotation_score=best_align_score;
         }else if(best_align_count>1){
-          this->final_annotation="Ambiguous_mapping";
+          //this->final_annotation="Ambiguous_mapping";
+          this->add_flag('A');
         }else{
-          this->final_annotation="Non-transcriptome";
+          //this->final_annotation="Non-transcriptome";
+          this->add_flag('N');
         }
       }
     }
@@ -560,12 +613,14 @@ public:
         this->final_annotation=choose_annotation(this->hit_ids[0],this->hit_names[0]);
         this->final_transcripts=this->hit_transcripts[0];
         //this->annotation_score=this->annotation_scores[0];
-        this->annotation_score=modify_annotation_score(0);
+        this->annotation_score=modify_annotation_score(0,debug);
       }else{
         if(this->qhitOrient[0]==-1){
-          this->final_annotation="Non-transcriptome";
+          //this->final_annotation="Non-transcriptome";
+          this->add_flag('N');
         }else{
-          this->final_annotation="Non-transcriptome";
+          //this->final_annotation="Non-transcriptome";
+          this->add_flag('N');
         }
       }
     //this condition should not exist in real data as num of hits < occupied region, but I processed it here.
@@ -580,12 +635,14 @@ public:
           this->final_annotation=choose_annotation(this->hit_ids[0],this->hit_names[0]);
           this->final_transcripts=this->hit_transcripts[0];
           //this->annotation_score=this->annotation_scores[0];
-          this->annotation_score=modify_annotation_score(0);
+          this->annotation_score=modify_annotation_score(0,debug);
         }else{
           if(this->qhitOrient[0]==-1){
-            this->final_annotation="Non-transcriptome";
+            //this->final_annotation="Non-transcriptome";
+            this->add_flag('N');
           }else{
-            this->final_annotation="Non-transcriptome";
+            //this->final_annotation="Non-transcriptome";
+            this->add_flag('N');
           }
         }
       }else{
@@ -598,7 +655,7 @@ public:
         fprintf(stderr,"add_annotation: multiple hits to 1 region\n");
       }
       
-      vector<int> valid_hit=filter_hit_by_strand(this->qhitOrient,desired_hit_strand);
+      vector<int> valid_hit=filter_hit_by_strand(this->qhitOrient,desired_hit_strand,debug);
       this->annotate_read_by_valid_hit(valid_hit,debug);
 
     //happen some times
@@ -682,8 +739,8 @@ public:
         this->barcodeStart=-1;
         this->barcodeStrand="*";
         this->barcodeMismatch=-1;
-        this->barcodeScore=9999;
-        this->annotation_score=9999;
+        this->barcodeScore=999999;
+        this->annotation_score=999999;
         break;
       case 'L':
         this->stat="Read_too_long";
@@ -691,8 +748,8 @@ public:
         this->barcodeStart=-1;
         this->barcodeStrand="*";
         this->barcodeMismatch=-1;
-        this->barcodeScore=9999;
-        this->annotation_score=9999;
+        this->barcodeScore=999999;
+        this->annotation_score=999999;
         break;
       case 'S':
         this->stat="Read_too_short";
@@ -700,8 +757,8 @@ public:
         this->barcodeStart=-1;
         this->barcodeStrand="*";
         this->barcodeMismatch=-1;
-        this->barcodeScore=9999;
-        this->annotation_score=9999;
+        this->barcodeScore=999999;
+        this->annotation_score=999999;
         break;
       case 'M':
         this->stat="Barcode_missing";
@@ -709,8 +766,8 @@ public:
         this->barcodeStart=-1;
         this->barcodeStrand="*";
         this->barcodeMismatch=-1;
-        this->barcodeScore=9999;
-        this->annotation_score=9999;
+        this->barcodeScore=999999;
+        this->annotation_score=999999;
         break;
       case 'R':
         this->stat="R1a_missing";
@@ -718,8 +775,8 @@ public:
         this->barcodeStart=-1;
         this->barcodeStrand="*";
         this->barcodeMismatch=-1;
-        this->barcodeScore=9999;
-        this->annotation_score=9999;
+        this->barcodeScore=999999;
+        this->annotation_score=999999;
         break;
       case 'C':
         this->stat="Complex_structure";
@@ -727,8 +784,16 @@ public:
         this->barcodeStart=-1;
         this->barcodeStrand="*";
         this->barcodeMismatch=-1;
-        this->barcodeScore=9999;
-        this->annotation_score=9999;
+        this->barcodeScore=999999;
+        this->annotation_score=999999;
+        break;
+      case 'A':
+        this->final_annotation="Ambiguous_mapping";
+        this->annotation_score=999999;
+        break;
+      case 'N':
+        this->final_annotation="Non-transcriptome";
+        this->annotation_score=999999;
         break;
     }
   }
@@ -1066,7 +1131,7 @@ public:
             this->barcodeScore=75;
             break;
           default:
-            this->barcodeScore=9999;
+            this->barcodeScore=999999;
             break;
       }
     }

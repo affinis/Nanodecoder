@@ -369,31 +369,35 @@ struct gene_feature{
  * 
  * @abstract: parsed read mapping info from BAM 
  * 
- * @ID                    read id
+ * @ID                    | read id
  * @read_length
- * @final_annotation_id   gene id of the final annotation of read (a read may have multiple alignment to ref).
- * @final_annotation_name gene name of the final annotation of read.
- * @read_orientation      orientation of this read infered from its mapping, "forward" or "reverse" or "*" 
- *                        (for read not mapped).
- * @qcovs                 query coverage of hits.
- * @qhits                 vector of pair<int,int>, indicate mapping start and end position on read, 1-based.
- * @hit_strands           orientation of hits corresponding to ref, "forward" or "reverse".
- * @is_spliced            is hits spliced.
- * @refs                  chromosome id (in header of genome fasta).
- * @features              gene ids of hits according to GTF file (a read may have multiple alignment to ref), 
- *                        notice that features.size() == qhits.size(), as some of the hits may not overlap with 
- *                        certain gene, i.e. not mapped to transcriptome, these hits would be annoatated as 
- *                        "non-coding".
- * @rcovs                 coverage of gene (for non-coding hits, rcov=0).
- * @rhits                 vector of pair<int,int>, indicate mapping start and end positions on chromosome, 1-based.
- * @read_orientations     orientation of read infered from its mappings, "forward" or "reverse" or "*".
- * @occupiedRegion        regions that occupied by hit(s).
- * @freeRegion            vector of pair<int,int>, indicate regions that not mapped to genome, 1-based.
- * @mergedRegions        vector of vector of int, indicate index (0-based) of qhits that were merged due to overlaping 
- *                        during calculation of occupiedRegion.
+ * @final_annotation_id   | gene id of the final annotation of read, string form of 'features', (a read may have multiple alignment to ref).
+ * @final_annotation_name | gene name of the final annotation of read.
+ * @read_orientation      | orientations of this read inferred from its mappings, "forward" or "reverse" or "*" 
+ *                          (for read not mapped), separated by ',', this data member is the string form of 'read_orientations'.
+ * @qcovs**               | query coverage of hits. 
+ * @qhits**               | vector of pair<int,int>, indicate mapping start and end position on read, 1-based.
+ * @hit_strands**         | orientation of hits corresponding to ref, "forward" or "reverse". 
+ * @is_spliced**          | is hits spliced. 
+ * @aligned_segments**    | some reads are aligned by segmentation (spliced), using vector of pair to represent them, if they are
+ *                          aligned without segmentation, using its rhit as the only item in vector.   
+ * @refs**                | chromosome id (in header of genome fasta). 
+ * @features**            | gene ids of hits according to GTF file (a read may have multiple alignment to ref), 
+ *                          notice that features.size() == qhits.size(), as some of the hits may not overlap with 
+ *                          certain gene, i.e. not mapped to transcriptome, these hits would be annotated as 
+ *                          "non-coding". 
+ * @rcovs**               | coverage of gene (for non-coding hits, rcov=0). 
+ * @rhits**               | vector of pair<int,int>, indicate mapping start and end positions on chromosome, 1-based.
+ * @read_orientations**   | orientation of read inferred from its mappings, "forward" or "reverse" or "*".
+ * @occupiedRegion        | regions that occupied by hit(s).
+ * @freeRegion            | vector of pair<int,int>, indicate regions that not mapped to genome, 1-based.
+ * @mergedRegions**       | vector of vector of int, indicate index (0-based) of qhits that were merged due to overlaping 
+ *                          during calculation of occupiedRegion.
  * @mapped_to_genome
  * @mapped_to_transcriptome
  * 
+ * 
+ * note: the lengths of data members with suffix '**' are expected to be equal.
  */
 
 struct mapping_info{
@@ -468,7 +472,13 @@ struct mapping_info{
     File << hit_strand_str << "\t" << annotation_score_str << "\n";
   }
   
-  int choose_from_overlapping_feature(pair<int,int>& rhit, vector<seq_feature> overlapping_features){
+  
+  /*!
+   * @abstract some genes share same start or end position (a rare case in overlapped genes), this function is 
+   *           used to choose the best one as the annotation with a specific read with its hit position on reference.
+   * 
+   */
+  int choose_from_overlapping_feature(pair<int,int>& rhit, vector<seq_feature> overlapping_features, bool debug=false){
     if(overlapping_features.size()==0){
       return(0);
     }
@@ -477,6 +487,9 @@ struct mapping_info{
     for(int i=0;i<overlapping_features.size();i++){
       pair<int,int> feat_pos={overlapping_features[i].start,overlapping_features[i].end};
       float overhang=abs(calculate_cov(feat_pos,rhit)-1);
+      if(debug){
+        fprintf(stderr,"choose_from_overlapping_feature: %i\t%s\t%f\n",i,overlapping_features[i].id.c_str(),overhang);
+      }
       if(i==0){
         min_overhang_index=i;
         min_overhang=overhang;
@@ -490,6 +503,7 @@ struct mapping_info{
     }
     return(min_overhang_index);
   }
+  
   
   /*!
    * @abstract annotate read with gene features
@@ -506,7 +520,6 @@ struct mapping_info{
   
   void annotateRead(unordered_map<string, map<int,vector<seq_feature>>>& sorted_gene_features, \
                     unordered_map<string, gene_feature>& gene_features, int tech, bool debug=false){
-    vector<int> hits_transcript_idx;
     if(debug){
       fprintf(stderr,"annotateRead: debug1: %s: start annotation\n",this->ID.c_str());
     }
@@ -527,6 +540,23 @@ struct mapping_info{
       }
       this->mapped_to_genome=true;
     }
+    
+    if(debug){
+      fprintf(stderr,"annotateRead: debug1.1: %s: initiating supplementary hits\n",this->ID.c_str());
+    }
+    vector<float> sup_qcovs;
+    vector<pair<int, int>> sup_qhits;
+    vector<string> sup_hit_strands;
+    vector<bool> sup_is_spliced;
+    vector<vector<pair<int,int>>> sup_aligned_segments;
+    vector<string> sup_refs;
+    vector<string> sup_features;
+    vector<float> sup_rcovs;
+    vector<pair<int,int>> sup_rhits;
+    vector<int> sup_annotation_scores;
+    vector<string> sup_read_orientations;
+    
+    int sup_hit_index=this->rhits.size()+1;
     for(int hit_index=0;hit_index<this->rhits.size();hit_index++){
       int qstart=this->qhits[hit_index].first;
       int qend=this->qhits[hit_index].second;
@@ -557,8 +587,9 @@ struct mapping_info{
           fprintf(stderr,"annotateRead: debug2.2: %s: adding candidate1 features\n",this->ID.c_str());
         }
         int candidate1_shift_time=0;
-        while(candidate1_shift_time<10&&candidate_feature1!=sorted_gene_features[this->refs[hit_index]].end()){
-          candidate_feature_set.push_back(candidate_feature1->second[choose_from_overlapping_feature(rhit,candidate_feature1->second)]);
+        while(candidate1_shift_time<20&&candidate_feature1!=sorted_gene_features[this->refs[hit_index]].end()){
+          //candidate_feature_set.push_back(candidate_feature1->second[choose_from_overlapping_feature(rhit,candidate_feature1->second,debug)]);
+          candidate_feature_set.insert(candidate_feature_set.end(),candidate_feature1->second.begin(),candidate_feature1->second.end());
           candidate1_shift_time++;
           candidate_feature1++;
         }
@@ -568,22 +599,25 @@ struct mapping_info{
         fprintf(stderr,"annotateRead: debug2.3: %s: adding candidate2 features\n",this->ID.c_str());
       }
       if(candidate_feature2!=sorted_gene_features[this->refs[hit_index]].end()){
-        candidate_feature_set.push_back(candidate_feature2->second[choose_from_overlapping_feature(rhit,candidate_feature2->second)]);
+        candidate_feature_set.push_back(candidate_feature2->second[choose_from_overlapping_feature(rhit,candidate_feature2->second,debug)]);
       }
       int candidate2_shift_time=0;
-      while(candidate2_shift_time<10&&candidate_feature2!=sorted_gene_features[this->refs[hit_index]].begin()){
+      while(candidate2_shift_time<20&&candidate_feature2!=sorted_gene_features[this->refs[hit_index]].begin()){
           candidate_feature2--;
-          candidate_feature_set.push_back(candidate_feature2->second[choose_from_overlapping_feature(rhit,candidate_feature2->second)]);
+          //candidate_feature_set.push_back(candidate_feature2->second[choose_from_overlapping_feature(rhit,candidate_feature2->second,debug)]);
+          candidate_feature_set.insert(candidate_feature_set.end(),candidate_feature2->second.begin(),candidate_feature2->second.end());
           candidate2_shift_time++;
       }
       
       if(debug){
         fprintf(stderr,"annotateRead: debug2.4: %s: iterating candidate features\n",this->ID.c_str());
       }
-      int min_overhang=1000000;
-      float max_rcov=0;
-      string best_hit_id;
-      seq_feature best_feature;
+      //int min_overhang=1000000;
+      //float max_rcov=0;
+      //string best_hit_id;
+      //seq_feature best_feature;
+      bool has_at_least_one_hit=false;
+      vector<string> valid_hit_set;
       for(seq_feature candidate_feature:candidate_feature_set){
         if(debug){
           fprintf(stderr,"annotateRead: debug2.4.1: %s: %s strand:%i position: %i-%i\n",this->ID.c_str(),
@@ -598,19 +632,67 @@ struct mapping_info{
           fprintf(stderr,"annotateRead: debug2.4.2: %s: %s: %f\t%i\n",this->ID.c_str(),
                   candidate_feature.id.c_str(),feature_cov,rhit_overhang);
         }
+      
         if(feature_cov==0){
           continue;
         }
-        //if(rhit_overhang<=min_overhang){
-        if(rhit_overhang/feature_cov<min_overhang/max_rcov||max_rcov==0){
-          max_rcov=feature_cov;
-          min_overhang=rhit_overhang;
-          best_hit_id=candidate_feature.id;
-          best_feature=candidate_feature;
+        
+        if(std::count(valid_hit_set.begin(),valid_hit_set.end(),candidate_feature.id)){
+          continue;
         }
-      }
+        
+        if(!has_at_least_one_hit){
+          if(debug){
+            fprintf(stderr,"annotateRead: debug2.4.3: found one hit\n");
+          }
+          valid_hit_set.push_back(candidate_feature.id);
+          this->features.push_back(candidate_feature.id);
+          string feature_strand=num2rna[gene_features[candidate_feature.id].strand];
+          string hit_strand=this->hit_strands[hit_index];
+          if(feature_strand==hit_strand){
+            this->read_orientations.push_back("forward");
+          }else{
+            this->read_orientations.push_back("reverse");
+          }
+          this->qcovs.push_back(qcov);
+          this->rcovs.push_back(feature_cov);
+          this->annotation_scores.push_back(floor(rhit_overhang/10));
+          has_at_least_one_hit=true;
+        }else{
+          if(debug){
+            fprintf(stderr,"annotateRead: debug2.4.3: found one supplementary hit\n");
+          }
+          valid_hit_set.push_back(candidate_feature.id);
+          sup_qcovs.push_back(qcov);
+          sup_qhits.push_back(this->qhits[hit_index]);
+          string feature_strand=num2rna[gene_features[candidate_feature.id].strand];
+          string hit_strand=this->hit_strands[hit_index];
+          sup_hit_strands.push_back(hit_strand);
+          if(feature_strand==hit_strand){
+            sup_read_orientations.push_back("forward");
+          }else{
+            sup_read_orientations.push_back("reverse");
+          }
+          sup_is_spliced.push_back(this->is_spliced[hit_index]);
+          sup_refs.push_back(this->refs[hit_index]);
+          sup_features.push_back(candidate_feature.id);
+          sup_rcovs.push_back(feature_cov);
+          sup_rhits.push_back(this->rhits[hit_index]);
+          for(int merged_region_index=0;merged_region_index<this->mergedRegions.size();merged_region_index++){
+            if(std::count(this->mergedRegions[merged_region_index].begin(),this->mergedRegions[merged_region_index].end(),hit_index)){
+              this->mergedRegions[merged_region_index].push_back(sup_hit_index);
+              sup_hit_index++;
+            }else{
+              continue;
+            }
+          }//for(int merged_region_index=0;merged_region_index<this->mergedRegions.size();merged_region_index++)
+          sup_annotation_scores.push_back(floor(rhit_overhang/10));
+          sup_aligned_segments.push_back(this->aligned_segments[hit_index]);
+        }//if(!has_at_least_one_hit)
+      }//for(seq_feature candidate_feature:candidate_feature_set)
       
-      if(max_rcov==0){
+      //if(max_rcov==0){
+      if(!has_at_least_one_hit){
         if(debug){
           fprintf(stderr,"annotateRead: debug2.5: %s: no feature for this hit\n",this->ID.c_str());
         }
@@ -620,27 +702,46 @@ struct mapping_info{
         this->rcovs.push_back(0);
         this->annotation_scores.push_back(9999);
         continue;
+      }else{
+        continue;
       }
       
-      if(debug){
-        fprintf(stderr,"annotateRead: debug2.6: %s: %s: %i-%i\n",this->ID.c_str(),best_feature.id.c_str(),best_feature.start,best_feature.end);
-      }
-      this->features.push_back(best_hit_id);
-      string feature_strand=num2rna[gene_features[best_hit_id].strand];
-      string hit_strand=this->hit_strands[hit_index];
-      this->qcovs.push_back(qcov);
-      this->rcovs.push_back(max_rcov);
-      hits_transcript_idx.push_back(hit_index);
-      this->annotation_scores.push_back(floor(min_overhang/10));
-      if(feature_strand==hit_strand){
-        this->read_orientations.push_back("forward");
-      }else{
-        this->read_orientations.push_back("reverse");
-      }
-      continue;
+      //this->features.push_back(best_hit_id);
+      //string feature_strand=num2rna[gene_features[best_hit_id].strand];
+      //string hit_strand=this->hit_strands[hit_index];
+      //this->qcovs.push_back(qcov);
+      //this->rcovs.push_back(max_rcov);
+      //this->annotation_scores.push_back(floor(min_overhang/10));
+      //if(feature_strand==hit_strand){
+      //  this->read_orientations.push_back("forward");
+      //}else{
+      //  this->read_orientations.push_back("reverse");
+      //}
+      //continue;
     } //for(int hit_index=0;hit_index<this->rhits.size();hit_index++)
     
-    this->identifyIsoforms(gene_features);
+    if(debug){
+      fprintf(stderr,"annotateRead: debug3.0: %s: %li primary genes have hit\n",this->ID.c_str(),this->features.size());
+    }
+    this->qcovs.insert(this->qcovs.end(),sup_qcovs.begin(),sup_qcovs.end());
+    this->qhits.insert(this->qhits.end(),sup_qhits.begin(),sup_qhits.end());
+    this->hit_strands.insert(this->hit_strands.end(),sup_hit_strands.begin(),sup_hit_strands.end());
+    this->is_spliced.insert(this->is_spliced.end(),sup_is_spliced.begin(),sup_is_spliced.end());
+    this->refs.insert(this->refs.end(),sup_refs.begin(),sup_refs.end());
+    this->features.insert(this->features.end(),sup_features.begin(),sup_features.end());
+    this->rcovs.insert(this->rcovs.end(),sup_rcovs.begin(),sup_rcovs.end());
+    this->rhits.insert(this->rhits.end(),sup_rhits.begin(),sup_rhits.end());
+    this->read_orientations.insert(this->read_orientations.end(),sup_read_orientations.begin(),sup_read_orientations.end());
+    this->aligned_segments.insert(this->aligned_segments.end(),sup_aligned_segments.begin(),sup_aligned_segments.end());
+    this->annotation_scores.insert(this->annotation_scores.end(),sup_annotation_scores.begin(),sup_annotation_scores.end());
+    if(debug){
+      fprintf(stderr,"annotateRead: debug3.1: %s: %li genes have hit\n",this->ID.c_str(),this->features.size());
+    }
+    
+    this->identifyIsoforms(gene_features,false,debug);
+    if(debug){
+      fprintf(stderr,"annotateRead: debug3.2: %s: isoforms identified\n",this->ID.c_str());
+    }
     this->final_annotation_id=stringCat(this->features);
     this->final_annotation_name="";
     for(string id:this->features){
@@ -685,7 +786,7 @@ struct mapping_info{
    *                   not recorded in GTF file).
    *                   
    */
-  void identifyIsoforms(unordered_map<string, gene_feature>& gene_features, bool loose_exon=false){
+  void identifyIsoforms(unordered_map<string, gene_feature>& gene_features, bool loose_exon=false, bool debug=false){
     for(int i=0;i<this->features.size();i++){
       this->transcripts.push_back("*");
     }
@@ -709,149 +810,19 @@ struct mapping_info{
         index++;
         continue;
       }
-      this->M_identifyIsoform(index,exon_table_used,exon_determine_threshold,gene_features,feature,gene_name,loose_exon);
+      if(debug){
+        fprintf(stderr,"identifyIsoforms: debug1: %s: inital trial using strict exon match\n",this->ID.c_str());
+      }
+      this->M_identifyIsoform(index,exon_table_used,exon_determine_threshold,gene_features,feature,gene_name,loose_exon,debug);
       if((!loose_exon && this->transcripts[index].find("novel")!=std::string::npos)||
          (this->transcripts[index].find(">")==std::string::npos && this->transcripts[index].find("unspliced")==std::string::npos)){
-        //fprintf(stderr,"%s: novel in strict mode: %s\n",this->ID.c_str(),this->transcripts[index].c_str());
-        this->M_identifyIsoform(index,gene_features[feature].loose_exons,0,gene_features,feature,gene_name,true);
+        if(debug){
+          fprintf(stderr,"identifyIsoforms: debug2: %s: secondary trial using loose exon match\n",this->ID.c_str());
+        }
+        this->M_identifyIsoform(index,gene_features[feature].loose_exons,0,gene_features,feature,gene_name,true,debug);
         this->transcripts[index]=this->transcripts[index]+'*';
       }
       index++;
-      /*
-      //mapped to transcript region and spliced
-      if(this->is_spliced[index]){
-        vector<int> exons;
-        bool has_novel_exon=false;
-        for(pair<int,int> segment:this->aligned_segments[index]){
-          int key=floor((segment.first+segment.second)/2);
-          auto candidate=exon_table_used.lower_bound(key);
-          //if(candidate!=gene_features[feature].exons.end()){
-            //fprintf(stderr,"debug1: %i->%i-%i\n",key,candidate->second.pos.first,candidate->second.pos.second);
-          //}
-          if(candidate==exon_table_used.end()||calculate_cov(segment,candidate->second.pos)<=exon_determine_threshold){
-            if(candidate!=exon_table_used.begin()){
-              candidate--;
-              //fprintf(stderr,"debug2: %i->%i-%i\n",key,candidate->second.pos.first,candidate->second.pos.second);
-            }else{
-              exons.push_back(-1);
-              has_novel_exon=true;
-              continue;
-            }
-          }
-          if(calculate_cov(segment,candidate->second.pos)>exon_determine_threshold){
-            //fprintf(stderr,"debug3: %i->%i-%i\n",key,candidate->second.pos.first,candidate->second.pos.second);
-            exons.push_back(candidate->second.id);
-            continue;
-          }else{
-            exons.push_back(-1);
-            has_novel_exon=true;
-            continue;
-          }
-        } //for(pair<int,int> segment:this->aligned_segments[index])
-        if(gene_features[feature].strand==3){
-          reverse(exons.begin(),exons.end());
-        }
-        string arrange=stringCat(exons,'>');
-        if(has_novel_exon){
-          this->transcripts.push_back(gene_name+"(novel="+arrange+")");
-          index++;
-          continue;
-        }else{
-          int match=0;
-          string latest_transcript_name;
-          for(auto transcript:gene_features[feature].transcripts){
-            vector<int>& transcript_exons_used=transcript.second.exons;
-            if(loose_exon){
-              transcript_exons_used=transcript.second.loose_exons;
-            }
-            if(exon_is_contained(transcript_exons_used,exons)){
-              match++;
-              latest_transcript_name=transcript.second.transcript_name;
-              if(latest_transcript_name.empty()){
-                latest_transcript_name=transcript.second.transcript_id;
-              }
-              continue;
-            }else{
-              continue;
-            }
-          } //for(auto transcript:gene_features[feature].transcripts)
-          if(match==0){
-            
-            this->transcripts.push_back(gene_name+"(novel="+arrange+")");
-            index++;
-          }else if(match==1){
-            this->transcripts.push_back(latest_transcript_name+"(fsm/ism="+arrange+")");
-            index++;
-          }else{
-            this->transcripts.push_back(gene_name+"(ambiguous="+arrange+")");
-            index++;
-          }
-        }//if(has_novel_exon)
-        
-      ////mapped to transcript region but no spliced mark was observed, i.e., no 'N's was observed in cigar, 
-      //mono exon match, mono_exonic, and unspliced transcript is included
-      }else{
-        if(exon_table_used.size()==1){
-          auto the_only_transcript=gene_features[feature].transcripts.begin();
-          string the_only_transcript_name=the_only_transcript->second.transcript_name;
-          this->transcripts.push_back(the_only_transcript_name+"(mono-exon_match)");
-          index++;
-          continue;
-        }else{
-          int key=floor((this->aligned_segments[index][0].first+this->aligned_segments[index][0].second)/2);
-          auto candidate=exon_table_used.lower_bound(key);
-          if(candidate==exon_table_used.end()||calculate_cov(this->aligned_segments[index][0],candidate->second.pos)<0.9){
-            if(candidate!=exon_table_used.begin()){
-              candidate--;
-            }else{
-              this->transcripts.push_back(gene_features[feature].gene_name+"(unspliced)");
-              index++;
-              continue;
-            }
-          }
-          if(calculate_cov(this->aligned_segments[index][0],candidate->second.pos)>=0.9){
-            int match=0;
-            string latest_transcript_name;
-            for(auto transcript:gene_features[feature].transcripts){
-              vector<int>& transcript_exons_used=transcript.second.exons;
-              if(loose_exon){
-                transcript_exons_used=transcript.second.loose_exons;
-              }
-              if(exon_is_contained(transcript_exons_used,candidate->second.id)){
-                match++;
-                latest_transcript_name=transcript.second.transcript_name;
-                if(latest_transcript_name.empty()){
-                  latest_transcript_name=transcript.second.transcript_id;
-                }
-                continue;
-              }else{
-                continue;
-              }
-            } //for(auto transcript:gene_features[feature].transcripts)
-            //fprintf(stderr,"%s\t%i\n",latest_transcript_name.c_str(),match);
-            //in practice this condition not exist
-            if(match==0){
-              this->transcripts.push_back(gene_name+"(novel="+to_string(candidate->second.id)+")");
-              index++;
-              continue;
-            //mono_exonic
-            }else if(match==1){
-              this->transcripts.push_back(latest_transcript_name+"(mono_exonic="+to_string(candidate->second.id)+")");
-              index++;
-              continue;
-            //the only exon matched to multiple transcripts
-            }else{
-              this->transcripts.push_back(gene_name+"(ambiguous="+to_string(candidate->second.id)+")");
-              index++;
-              continue;
-            }
-          }else{
-            this->transcripts.push_back(gene_features[feature].gene_name+"(unspliced)");
-            index++;
-            continue;
-          }
-        }
-      } */
     } //for(string feature:this->features)
   } //identifyIsoforms
   
@@ -862,7 +833,7 @@ struct mapping_info{
    */
   void M_identifyIsoform(int index, map<int, exon_feature>& exon_table_used, float exon_determine_threshold,
                          unordered_map<string, gene_feature>& gene_features, string feature, string gene_name,
-                         bool loose_exon){
+                         bool loose_exon, bool debug){
     //mapped to transcript region and spliced
     if(this->is_spliced[index]){
       vector<int> exons;
@@ -870,9 +841,6 @@ struct mapping_info{
       for(pair<int,int> segment:this->aligned_segments[index]){
         int key=floor((segment.first+segment.second)/2);
         auto candidate=exon_table_used.lower_bound(key);
-        //if(candidate!=gene_features[feature].exons.end()){
-        //fprintf(stderr,"debug1: %i->%i-%i\n",key,candidate->second.pos.first,candidate->second.pos.second);
-        //}
         if(candidate==exon_table_used.end()||calculate_cov(segment,candidate->second.pos)<=exon_determine_threshold){
           if(candidate!=exon_table_used.begin()){
             candidate--;
@@ -883,7 +851,7 @@ struct mapping_info{
             continue;
           }
         }
-        if(calculate_cov(segment,candidate->second.pos)>exon_determine_threshold){
+        if(calculate_cov(segment,candidate->second.pos)>exon_determine_threshold&&calculate_cov(candidate->second.pos,segment)>exon_determine_threshold){
           //fprintf(stderr,"debug3: %i->%i-%i\n",key,candidate->second.pos.first,candidate->second.pos.second);
           exons.push_back(candidate->second.id);
           continue;
@@ -896,18 +864,31 @@ struct mapping_info{
       if(gene_features[feature].strand==3){
         reverse(exons.begin(),exons.end());
       }
-      string arrange=stringCat(exons,'>');
+      string arrange=stringCat(exons,'>',false);
       if(has_novel_exon){
         this->transcripts[index]=gene_name+"(novel="+arrange+")";
       }else{
         int match=0;
         string latest_transcript_name;
+        if(debug){
+          fprintf(stderr,"exon arrange: %s\n",arrange.c_str());
+        }
         for(auto transcript:gene_features[feature].transcripts){
           vector<int>& transcript_exons_used=transcript.second.exons;
+          if(debug){
+            fprintf(stderr,"M_identifyIsoform: debug1: comparing %s: %s\n",
+                    transcript.second.transcript_name.c_str(),
+                    stringCat(transcript_exons_used,'>',false).c_str());
+          }
           if(loose_exon){
             transcript_exons_used=transcript.second.loose_exons;
           }
-          if(exon_is_contained(transcript_exons_used,exons)){
+          //if(exon_is_contained(transcript_exons_used,exons)){
+          if(exon_is_contained(stringCat(transcript_exons_used,'>',false),arrange)){
+            if(debug){
+              fprintf(stderr,"M_identifyIsoform: debug2: hit found %s\n",
+                      transcript.second.transcript_name.c_str());
+            }
             match++;
             latest_transcript_name=transcript.second.transcript_name;
             if(latest_transcript_name.empty()){

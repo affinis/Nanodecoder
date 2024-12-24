@@ -376,40 +376,68 @@ vector<int> seq2CurrentLevels(string& seq, std::unordered_map<string, int>& curr
   return(current_levels);
 }
 
-string stringCat(vector<string>& vec,char sep=','){
+string stringCat(vector<string>& vec,char sep=',',bool trim=true){
   string res="";
+  if(!trim){
+    res=res+sep;
+  }
   for(string str:vec){
     res=res+str+sep;
   }
-  res.erase(res.end()-1);
-  return(res);
+  if(!trim){
+    return(res);
+  }else{
+    res.erase(res.end()-1);
+    return(res);
+  }
 }
 
-string stringCat(vector<float>& vec,char sep=','){
+string stringCat(vector<float>& vec,char sep=',',bool trim=true){
   string res="";
+  if(!trim){
+    res=res+sep;
+  }
   for(float flo:vec){
     res=res+to_string(flo)+sep;
   }
-  res.erase(res.end()-1);
-  return(res);
+  if(!trim){
+    return(res);
+  }else{
+    res.erase(res.end()-1);
+    return(res);
+  }
 }
   
-string stringCat(vector<int>& vec,char sep=','){
+string stringCat(vector<int>& vec,char sep=',',bool trim=true){
   string res="";
+  if(!trim){
+    res=res+sep;
+  }
   for(int integer:vec){
     res=res + to_string(integer) + sep;
   }
-  res.erase(res.end()-1);
-  return(res);
+  if(!trim){
+    return(res);
+  }else{
+    res.erase(res.end()-1);
+    return(res);
+  }
 }
 
-string stringCat(vector<bool>& vec, char sep=','){
+string stringCat(vector<bool>& vec, char sep=',',bool trim=true){
   string res="";
+  if(!trim){
+    res=res+sep;
+  }
   for(bool boo:vec){
     res=res+to_string(boo)+sep;
   }
-  res.erase(res.end()-1);
-  return(res);
+  if(!trim){
+    return(res);
+  }else{
+    res.erase(res.end()-1);
+    return(res);
+  }
 }
 
 vector<pair<int,int>> string2regions(string& str){
@@ -622,6 +650,15 @@ bool exon_is_contained(std::vector<int> first, std::vector<int> second){
   //std::sort(second.begin(), second.end());
   // Check if  all elements of a second vector exists in first vector
   return std::includes(first.begin(), first.end(), second.begin(), second.end());
+}
+
+bool exon_is_contained(string first, string second){
+  //we do not need to sort as the exon order is fixed in GTF
+  if(first.find(second)!=string::npos){
+    return(true);
+  }else{
+    return(false);
+  }
 }
 
 bool exon_is_contained(std::vector<int> first, int single_element){
